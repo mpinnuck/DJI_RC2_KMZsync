@@ -1168,8 +1168,8 @@ if ($devices) {
 
     def load_pc_kmz_files(self) -> List[KMZFile]:
         """
-        Scan the PC source folder for .kmz files (non-recursive).
-        Returns a sorted list of KMZFile objects.
+           Recursively scan the PC source folder for .kmz files.
+           Returns a sorted list of KMZFile objects with full paths.
         """
         files: List[KMZFile] = []
         self._last_error = None
@@ -1178,9 +1178,14 @@ if ($devices) {
             return files
 
         try:
-            for entry in sorted(os.scandir(root), key=lambda e: e.name):
-                if entry.is_file() and entry.name.lower().endswith(".kmz"):
-                    files.append(KMZFile(filename=entry.name, full_path=entry.path))
+               for entry in sorted(os.walk(root)):
+                   folder_path, _, filenames = entry
+                   for filename in sorted(filenames):
+                       if filename.lower().endswith(".kmz"):
+                           full_path = os.path.join(folder_path, filename)
+                           # Store relative path for display
+                           rel_path = os.path.relpath(full_path, root)
+                           files.append(KMZFile(filename=rel_path, full_path=full_path))
         except OSError as e:
             msg = f"[SyncViewModel] Error scanning PC folder: {e}"
             self._set_last_error(msg)

@@ -1,144 +1,9 @@
 {
-    "updated_at": "2026-05-21 14:39:04",
+    "updated_at": "2026-05-21 15:07:03",
     "note": "This map tracks file-level copy operations only. If RC-2 is opened with 'adjust/open as new', DJI app metadata may create a new mission record that diverges from this mapping.",
     "by_source": {
         "source.kmz": {
             "history": [
-                {
-                    "copied_at": "2026-05-21 14:21:18",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpxqg0ozxp\\pc\\source.kmz",
-                    "target_mission_guid": "guid-002",
-                    "target_kmz_filename": "guid-002.kmz",
-                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-002",
-                    "connection_mode": "MTP"
-                },
-                {
-                    "copied_at": "2026-05-21 14:21:18",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp9objmiy8\\pc\\source.kmz",
-                    "target_mission_guid": "guid-001",
-                    "target_kmz_filename": "existing.kmz",
-                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-001",
-                    "connection_mode": "MTP"
-                },
-                {
-                    "copied_at": "2026-05-21 14:21:18",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpd81k0ke3\\pc\\source.kmz",
-                    "target_mission_guid": "18D5F0E0-4395-460E-9678-56E14230C202",
-                    "target_kmz_filename": "18D5F0E0-4395-460E-9678-56E14230C202.kmz",
-                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|18D5F0E0-4395-460E-9678-56E14230C202",
-                    "connection_mode": "MTP"
-                },
-                {
-                    "copied_at": "2026-05-21 14:25:29",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp2k1nbusw\\pc\\source.kmz",
-                    "target_mission_guid": "guid-002",
-                    "target_kmz_filename": "guid-002.kmz",
-                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp2k1nbusw\\rc2\\guid-002",
-                    "connection_mode": "Filesystem"
-                },
-                {
-                    "copied_at": "2026-05-21 14:25:29",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp0g8z2s2n\\pc\\source.kmz",
-                    "target_mission_guid": "guid-002",
-                    "target_kmz_filename": "guid-002.kmz",
-                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-002",
-                    "connection_mode": "MTP"
-                },
-                {
-                    "copied_at": "2026-05-21 14:25:29",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpul5rhjbz\\pc\\source.kmz",
-                    "target_mission_guid": "guid-001",
-                    "target_kmz_filename": "existing.kmz",
-                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-001",
-                    "connection_mode": "MTP"
-                },
-                {
-                    "copied_at": "2026-05-21 14:25:29",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpnvdsuwu0\\pc\\source.kmz",
-                    "target_mission_guid": "71B92DFA-B569-40B0-8B22-BA61CC8B0954",
-                    "target_kmz_filename": "71B92DFA-B569-40B0-8B22-BA61CC8B0954.kmz",
-                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|71B92DFA-B569-40B0-8B22-BA61CC8B0954",
-                    "connection_mode": "MTP"
-                },
-                {
-                    "copied_at": "2026-05-21 14:27:56",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpss6dt_ch\\pc\\source.kmz",
-                    "target_mission_guid": "guid-002",
-                    "target_kmz_filename": "guid-002.kmz",
-                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpss6dt_ch\\rc2\\guid-002",
-                    "connection_mode": "Filesystem"
-                },
-                {
-                    "copied_at": "2026-05-21 14:27:56",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmppow0t4qg\\pc\\source.kmz",
-                    "target_mission_guid": "guid-002",
-                    "target_kmz_filename": "guid-002.kmz",
-                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-002",
-                    "connection_mode": "MTP"
-                },
-                {
-                    "copied_at": "2026-05-21 14:27:56",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpq6xb2_xy\\pc\\source.kmz",
-                    "target_mission_guid": "guid-001",
-                    "target_kmz_filename": "existing.kmz",
-                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-001",
-                    "connection_mode": "MTP"
-                },
-                {
-                    "copied_at": "2026-05-21 14:27:56",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp64skylxh\\pc\\source.kmz",
-                    "target_mission_guid": "7884F838-99F8-41AC-946F-0BCD2FA5FDC3",
-                    "target_kmz_filename": "7884F838-99F8-41AC-946F-0BCD2FA5FDC3.kmz",
-                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|7884F838-99F8-41AC-946F-0BCD2FA5FDC3",
-                    "connection_mode": "MTP"
-                },
-                {
-                    "copied_at": "2026-05-21 14:31:57",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpca0d_uq8\\pc\\source.kmz",
-                    "target_mission_guid": "guid-002",
-                    "target_kmz_filename": "guid-002.kmz",
-                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpca0d_uq8\\rc2\\guid-002",
-                    "connection_mode": "Filesystem"
-                },
-                {
-                    "copied_at": "2026-05-21 14:31:57",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp8avuc_c0\\pc\\source.kmz",
-                    "target_mission_guid": "guid-002",
-                    "target_kmz_filename": "guid-002.kmz",
-                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-002",
-                    "connection_mode": "MTP"
-                },
-                {
-                    "copied_at": "2026-05-21 14:31:57",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpq38pac4z\\pc\\source.kmz",
-                    "target_mission_guid": "guid-001",
-                    "target_kmz_filename": "existing.kmz",
-                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-001",
-                    "connection_mode": "MTP"
-                },
-                {
-                    "copied_at": "2026-05-21 14:31:57",
-                    "source_filename": "source.kmz",
-                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpl1p987e9\\pc\\source.kmz",
-                    "target_mission_guid": "B07094B2-BEDE-4AB6-8483-8947B4AE0B5E",
-                    "target_kmz_filename": "B07094B2-BEDE-4AB6-8483-8947B4AE0B5E.kmz",
-                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|B07094B2-BEDE-4AB6-8483-8947B4AE0B5E",
-                    "connection_mode": "MTP"
-                },
                 {
                     "copied_at": "2026-05-21 14:33:19",
                     "source_filename": "source.kmz",
@@ -228,12 +93,147 @@
                     "target_kmz_filename": "existing.kmz",
                     "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-001",
                     "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-21 14:47:38",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp6lbnrgrp\\pc\\source.kmz",
+                    "target_mission_guid": "guid-002",
+                    "target_kmz_filename": "guid-002.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp6lbnrgrp\\rc2\\guid-002",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:47:38",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpanz95d5l\\pc\\source.kmz",
+                    "target_mission_guid": "guid-002",
+                    "target_kmz_filename": "guid-002.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-002",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-21 14:47:38",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpfr0ky736\\pc\\source.kmz",
+                    "target_mission_guid": "guid-001",
+                    "target_kmz_filename": "existing.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-001",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-21 14:54:22",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmph25l8vvd\\pc\\source.kmz",
+                    "target_mission_guid": "guid-002",
+                    "target_kmz_filename": "guid-002.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmph25l8vvd\\rc2\\guid-002",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:54:22",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp6g155im6\\pc\\source.kmz",
+                    "target_mission_guid": "guid-002",
+                    "target_kmz_filename": "guid-002.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-002",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-21 14:54:22",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpwgypngxs\\pc\\source.kmz",
+                    "target_mission_guid": "guid-001",
+                    "target_kmz_filename": "existing.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-001",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-21 14:55:04",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpad19o0ll\\pc\\source.kmz",
+                    "target_mission_guid": "guid-002",
+                    "target_kmz_filename": "guid-002.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpad19o0ll\\rc2\\guid-002",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:55:04",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp73i8vj7i\\pc\\source.kmz",
+                    "target_mission_guid": "guid-002",
+                    "target_kmz_filename": "guid-002.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-002",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-21 14:55:04",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp7930qnj_\\pc\\source.kmz",
+                    "target_mission_guid": "guid-001",
+                    "target_kmz_filename": "existing.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-001",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-21 15:03:49",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpgoty35h9\\pc\\source.kmz",
+                    "target_mission_guid": "guid-002",
+                    "target_kmz_filename": "guid-002.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpgoty35h9\\rc2\\guid-002",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 15:03:49",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpwg7szsps\\pc\\source.kmz",
+                    "target_mission_guid": "guid-002",
+                    "target_kmz_filename": "guid-002.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-002",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-21 15:03:49",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpv2cbwh0a\\pc\\source.kmz",
+                    "target_mission_guid": "guid-001",
+                    "target_kmz_filename": "existing.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-001",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-21 15:07:03",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp65yay2ii\\pc\\source.kmz",
+                    "target_mission_guid": "guid-002",
+                    "target_kmz_filename": "guid-002.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp65yay2ii\\rc2\\guid-002",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 15:07:03",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpc__k8vh3\\pc\\source.kmz",
+                    "target_mission_guid": "guid-002",
+                    "target_kmz_filename": "guid-002.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-002",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-21 15:07:03",
+                    "source_filename": "source.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpnal96c9s\\pc\\source.kmz",
+                    "target_mission_guid": "guid-001",
+                    "target_kmz_filename": "existing.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-001",
+                    "connection_mode": "MTP"
                 }
             ],
             "last": {
-                "copied_at": "2026-05-21 14:39:04",
+                "copied_at": "2026-05-21 15:07:03",
                 "source_filename": "source.kmz",
-                "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp6micrnbz\\pc\\source.kmz",
+                "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpnal96c9s\\pc\\source.kmz",
                 "target_mission_guid": "guid-001",
                 "target_kmz_filename": "existing.kmz",
                 "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|guid-001",
@@ -349,15 +349,60 @@
                     "target_kmz_filename": "existing.kmz",
                     "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpej13r68z\\rc2\\guid-001",
                     "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:47:38",
+                    "source_filename": "new_mission.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpgx25evqe\\pc\\new_mission.kmz",
+                    "target_mission_guid": "guid-001",
+                    "target_kmz_filename": "existing.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpgx25evqe\\rc2\\guid-001",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:54:22",
+                    "source_filename": "new_mission.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp55vcqj70\\pc\\new_mission.kmz",
+                    "target_mission_guid": "guid-001",
+                    "target_kmz_filename": "existing.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp55vcqj70\\rc2\\guid-001",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:55:04",
+                    "source_filename": "new_mission.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpfpt7_ecd\\pc\\new_mission.kmz",
+                    "target_mission_guid": "guid-001",
+                    "target_kmz_filename": "existing.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpfpt7_ecd\\rc2\\guid-001",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 15:03:49",
+                    "source_filename": "new_mission.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpxxodj1xn\\pc\\new_mission.kmz",
+                    "target_mission_guid": "guid-001",
+                    "target_kmz_filename": "existing.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpxxodj1xn\\rc2\\guid-001",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 15:07:03",
+                    "source_filename": "new_mission.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpcyb2zfgc\\pc\\new_mission.kmz",
+                    "target_mission_guid": "guid-001",
+                    "target_kmz_filename": "existing.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpcyb2zfgc\\rc2\\guid-001",
+                    "connection_mode": "Filesystem"
                 }
             ],
             "last": {
-                "copied_at": "2026-05-21 14:39:04",
+                "copied_at": "2026-05-21 15:07:03",
                 "source_filename": "new_mission.kmz",
-                "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpej13r68z\\pc\\new_mission.kmz",
+                "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpcyb2zfgc\\pc\\new_mission.kmz",
                 "target_mission_guid": "guid-001",
                 "target_kmz_filename": "existing.kmz",
-                "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpej13r68z\\rc2\\guid-001",
+                "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpcyb2zfgc\\rc2\\guid-001",
                 "connection_mode": "Filesystem"
             }
         },
@@ -470,15 +515,60 @@
                     "target_kmz_filename": "target.kmz",
                     "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmprg6y532w\\rc2\\guid-003",
                     "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:47:38",
+                    "source_filename": "replacement.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmph0vd1q3g\\pc\\replacement.kmz",
+                    "target_mission_guid": "guid-003",
+                    "target_kmz_filename": "target.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmph0vd1q3g\\rc2\\guid-003",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:54:22",
+                    "source_filename": "replacement.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp71pq6t2s\\pc\\replacement.kmz",
+                    "target_mission_guid": "guid-003",
+                    "target_kmz_filename": "target.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp71pq6t2s\\rc2\\guid-003",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:55:04",
+                    "source_filename": "replacement.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp6ciu_028\\pc\\replacement.kmz",
+                    "target_mission_guid": "guid-003",
+                    "target_kmz_filename": "target.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp6ciu_028\\rc2\\guid-003",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 15:03:49",
+                    "source_filename": "replacement.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpl8kcx5n6\\pc\\replacement.kmz",
+                    "target_mission_guid": "guid-003",
+                    "target_kmz_filename": "target.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpl8kcx5n6\\rc2\\guid-003",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 15:07:03",
+                    "source_filename": "replacement.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp3aod7zra\\pc\\replacement.kmz",
+                    "target_mission_guid": "guid-003",
+                    "target_kmz_filename": "target.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp3aod7zra\\rc2\\guid-003",
+                    "connection_mode": "Filesystem"
                 }
             ],
             "last": {
-                "copied_at": "2026-05-21 14:39:04",
+                "copied_at": "2026-05-21 15:07:03",
                 "source_filename": "replacement.kmz",
-                "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmprg6y532w\\pc\\replacement.kmz",
+                "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp3aod7zra\\pc\\replacement.kmz",
                 "target_mission_guid": "guid-003",
                 "target_kmz_filename": "target.kmz",
-                "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmprg6y532w\\rc2\\guid-003",
+                "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp3aod7zra\\rc2\\guid-003",
                 "connection_mode": "Filesystem"
             }
         },
@@ -694,15 +784,60 @@
                     "target_kmz_filename": "dest.kmz",
                     "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpir9vvpyu\\rc2\\guid-006",
                     "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:47:38",
+                    "source_filename": "src.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpdnv59yjn\\pc\\src.kmz",
+                    "target_mission_guid": "guid-006",
+                    "target_kmz_filename": "dest.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpdnv59yjn\\rc2\\guid-006",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:54:22",
+                    "source_filename": "src.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp9h7uzcal\\pc\\src.kmz",
+                    "target_mission_guid": "guid-006",
+                    "target_kmz_filename": "dest.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp9h7uzcal\\rc2\\guid-006",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:55:04",
+                    "source_filename": "src.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp8ym59qfm\\pc\\src.kmz",
+                    "target_mission_guid": "guid-006",
+                    "target_kmz_filename": "dest.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp8ym59qfm\\rc2\\guid-006",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 15:03:49",
+                    "source_filename": "src.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpj0i43afb\\pc\\src.kmz",
+                    "target_mission_guid": "guid-006",
+                    "target_kmz_filename": "dest.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpj0i43afb\\rc2\\guid-006",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 15:07:03",
+                    "source_filename": "src.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmprfgdc2p1\\pc\\src.kmz",
+                    "target_mission_guid": "guid-006",
+                    "target_kmz_filename": "dest.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmprfgdc2p1\\rc2\\guid-006",
+                    "connection_mode": "Filesystem"
                 }
             ],
             "last": {
-                "copied_at": "2026-05-21 14:39:04",
+                "copied_at": "2026-05-21 15:07:03",
                 "source_filename": "src.kmz",
-                "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpir9vvpyu\\pc\\src.kmz",
+                "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmprfgdc2p1\\pc\\src.kmz",
                 "target_mission_guid": "guid-006",
                 "target_kmz_filename": "dest.kmz",
-                "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpir9vvpyu\\rc2\\guid-006",
+                "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmprfgdc2p1\\rc2\\guid-006",
                 "connection_mode": "Filesystem"
             }
         },
@@ -815,15 +950,60 @@
                     "target_kmz_filename": "target.kmz",
                     "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp7680aj5a\\rc2\\guid-005",
                     "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:47:38",
+                    "source_filename": "my_flight.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpn6tq5e5y\\pc\\my_flight.kmz",
+                    "target_mission_guid": "guid-005",
+                    "target_kmz_filename": "target.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpn6tq5e5y\\rc2\\guid-005",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:54:22",
+                    "source_filename": "my_flight.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp4geu8iu3\\pc\\my_flight.kmz",
+                    "target_mission_guid": "guid-005",
+                    "target_kmz_filename": "target.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp4geu8iu3\\rc2\\guid-005",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 14:55:04",
+                    "source_filename": "my_flight.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpc1q22bo9\\pc\\my_flight.kmz",
+                    "target_mission_guid": "guid-005",
+                    "target_kmz_filename": "target.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpc1q22bo9\\rc2\\guid-005",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 15:03:49",
+                    "source_filename": "my_flight.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmposdmephd\\pc\\my_flight.kmz",
+                    "target_mission_guid": "guid-005",
+                    "target_kmz_filename": "target.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmposdmephd\\rc2\\guid-005",
+                    "connection_mode": "Filesystem"
+                },
+                {
+                    "copied_at": "2026-05-21 15:07:03",
+                    "source_filename": "my_flight.kmz",
+                    "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpv9u2qgo0\\pc\\my_flight.kmz",
+                    "target_mission_guid": "guid-005",
+                    "target_kmz_filename": "target.kmz",
+                    "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpv9u2qgo0\\rc2\\guid-005",
+                    "connection_mode": "Filesystem"
                 }
             ],
             "last": {
-                "copied_at": "2026-05-21 14:39:04",
+                "copied_at": "2026-05-21 15:07:03",
                 "source_filename": "my_flight.kmz",
-                "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp7680aj5a\\pc\\my_flight.kmz",
+                "source_full_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpv9u2qgo0\\pc\\my_flight.kmz",
                 "target_mission_guid": "guid-005",
                 "target_kmz_filename": "target.kmz",
-                "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmp7680aj5a\\rc2\\guid-005",
+                "target_folder_path": "C:\\Users\\MARKPI~1\\AppData\\Local\\Temp\\tmpv9u2qgo0\\rc2\\guid-005",
                 "connection_mode": "Filesystem"
             }
         }

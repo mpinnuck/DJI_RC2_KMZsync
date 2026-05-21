@@ -6,9 +6,9 @@ import traceback
 import io
 import tkinter as tk
 from datetime import datetime
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v1.2"
+_APP_VERSION = "v1.3"
 
 
 try:
@@ -59,11 +59,17 @@ class MainView:
         self._refresh_queue: queue.Queue = queue.Queue()
         self._copy_queue: queue.Queue = queue.Queue()
         self._inspect_queue: queue.Queue = queue.Queue()
+        self._delete_queue: queue.Queue = queue.Queue()
         self._mapping_rows: list[dict[str, str]] = []
+        self._pc_files_by_item: dict[str, KMZFile] = {}
         self._refresh_serial = 0
+        self._refresh_active = False
+        self._refresh_pc_loaded = False
+        self._refresh_rc_loaded = False
         self._busy = False
         self._copy_in_progress = False
         self._inspect_in_progress = False
+        self._delete_in_progress = False
         self._refresh_pending = False
         self._last_error_log_key: str | None = None
         self._last_error_log_time = 0.0
@@ -478,8 +484,10 @@ class MainView:
         tree_frame.grid_columnconfigure(0, weight=1)
 
         tree = ttk.Treeview(tree_frame, columns=("filename",),
-                            show="headings", selectmode="browse")
+                                show="tree headings", selectmode="browse")
+        tree.heading("#0", text="Folder / Path")
         tree.heading("filename", text="KMZ Filename")
+        tree.column("#0", width=150, stretch=False)
         tree.column("filename", width=300, stretch=True)
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
@@ -618,21 +626,39 @@ class MainView:
             self._log("Delete blocked: no RC-2 mission selected.", level="WARN")
             return
 
-        ok, msg = self._vm.delete_rc2_mission(mission)
-        if ok:
-            self._set_status("Mission deleted.", colour=_SUCCESS)
-            self._log(msg, level="OK")
-            self._refresh()
+        if not messagebox.askyesno(
+            "Confirm Delete",
+            f"Permanently delete RC-2 mission slot?\n\n{mission.guid}\n\nThis cannot be undone."
+        ):
             return
 
-        self._set_status("✘  Mission delete failed.", colour=_ERROR)
-        self._log(msg.replace("\n", " | "), level="ERROR")
+        self._set_busy(True, "Deleting mission...")
+        self._set_status("Delete in progress...", colour=_TEXT_DIM)
+        self._delete_in_progress = True
+
+        def _worker() -> None:
+            started = time.monotonic()
+            try:
+                ok, msg = self._vm.delete_rc2_mission(mission)
+            except Exception as exc:
+                ok, msg = False, f"Unhandled delete error: {exc}"
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._delete_queue.put((ok, msg, elapsed_ms))
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._root.after(50, self._drain_delete_queue)
 
     def _delete_selected_kmz(self) -> None:
         kmz_file = self._selected_kmz()
         if kmz_file is None:
             self._set_status("Select a Dronelink KMZ file to delete.", colour=_ERROR)
             self._log("Delete blocked: no PC KMZ selected.", level="WARN")
+            return
+
+        if not messagebox.askyesno(
+            "Confirm Delete",
+            f"Delete PC KMZ file?\n\n{kmz_file.filename}"
+        ):
             return
 
         ok, msg = self._vm.delete_pc_kmz_file(kmz_file)
@@ -642,6 +668,7 @@ class MainView:
             files = self._vm.load_pc_kmz_files()
             pc_error = self._vm.consume_last_error()
             self._populate_pc_tree(files, pc_error)
+            self._refresh_mapping()
             return
 
         self._set_status("✘  KMZ delete failed.", colour=_ERROR)
@@ -675,6 +702,34 @@ class MainView:
         self._set_status("✘  Copy failed.", colour=_ERROR)
         self._log(msg.replace("\n", " | "), level="ERROR")
         self._log(f"Copy failed after {elapsed_ms} ms", level="DEBUG")
+
+    def _drain_delete_queue(self) -> None:
+        latest = None
+        while True:
+            try:
+                latest = self._delete_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        if latest is None:
+            if self._delete_in_progress:
+                self._root.after(50, self._drain_delete_queue)
+            return
+
+        ok, msg, elapsed_ms = latest
+        self._delete_in_progress = False
+        self._set_busy(False, "")
+
+        if ok:
+            self._set_status(f"✔  Mission deleted.", colour=_SUCCESS)
+            self._log(msg, level="OK")
+            self._log(f"Delete completed in {elapsed_ms} ms", level="DEBUG")
+            self._refresh()
+            return
+
+        self._set_status("✘  Delete failed.", colour=_ERROR)
+        self._log(msg.replace("\n", " | "), level="ERROR")
+        self._log(f"Delete failed after {elapsed_ms} ms", level="DEBUG")
 
     def _check_adb_status(self) -> None:
         self._log("ADB status check requested.")
@@ -761,81 +816,124 @@ class MainView:
 
         self._refresh_serial += 1
         serial = self._refresh_serial
+        self._refresh_active = True
+        self._refresh_pc_loaded = False
+        self._refresh_rc_loaded = False
         self._set_busy(True, "Please wait initializing...")
         self._set_status("Please wait initializing...")
         self._log("Initializing mission and file lists...", level="INFO")
 
         def _worker() -> None:
-            try:
-                started = time.monotonic()
-                self._vm.clear_stale_preview_cache()
-                missions = self._vm.load_rc2_missions()
-                rc2_error = self._vm.consume_last_error()
-                preview_data: dict[str, bytes | None] = {}
-                for mission in missions:
-                    path = self._vm.get_mission_preview_path(mission.guid)
-                    data: bytes | None = None
-                    if path and os.path.isfile(path):
-                        try:
-                            with open(path, "rb") as fh:
-                                data = fh.read()
-                        except OSError:
-                            data = None
+            started = time.monotonic()
 
-                        lowered = os.path.normpath(path).lower()
-                        if "djirc2kmzsync-previews" in lowered:
+            def _load_pc() -> None:
+                try:
+                    files = self._vm.load_pc_kmz_files()
+                    pc_error = self._vm.consume_last_error()
+                    self._refresh_queue.put(("pc", serial, files, pc_error, None))
+                except Exception as exc:
+                    self._refresh_queue.put(("error", serial, f"PC refresh failed: {exc}"))
+
+            def _load_rc2() -> None:
+                try:
+                    self._vm.clear_stale_preview_cache()
+                    missions = self._vm.load_rc2_missions()
+                    rc2_error = self._vm.consume_last_error()
+                    preview_data: dict[str, bytes | None] = {}
+                    for mission in missions:
+                        path = self._vm.get_mission_preview_path(mission.guid)
+                        data: bytes | None = None
+                        if path and os.path.isfile(path):
                             try:
-                                os.remove(path)
+                                with open(path, "rb") as fh:
+                                    data = fh.read()
                             except OSError:
-                                pass
+                                data = None
 
-                    preview_data[mission.guid] = data
+                            lowered = os.path.normpath(path).lower()
+                            if "djirc2kmzsync-previews" in lowered:
+                                try:
+                                    os.remove(path)
+                                except OSError:
+                                    pass
 
-                files = self._vm.load_pc_kmz_files()
-                pc_error = self._vm.consume_last_error()
-                elapsed_ms = int((time.monotonic() - started) * 1000)
-                self._refresh_queue.put((serial, missions, rc2_error, files, pc_error, preview_data, None, elapsed_ms))
-            except Exception as exc:
-                self._refresh_queue.put((serial, [], None, [], None, {}, str(exc), 0))
+                        preview_data[mission.guid] = data
+
+                    self._refresh_queue.put(("rc", serial, missions, rc2_error, preview_data))
+                except Exception as exc:
+                    self._refresh_queue.put(("error", serial, f"RC-2 refresh failed: {exc}"))
+
+            pc_thread = threading.Thread(target=_load_pc, daemon=True)
+            rc_thread = threading.Thread(target=_load_rc2, daemon=True)
+            pc_thread.start()
+            rc_thread.start()
+            pc_thread.join()
+            rc_thread.join()
+
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._refresh_queue.put(("done", serial, elapsed_ms))
 
         threading.Thread(target=_worker, daemon=True).start()
         self._root.after(50, self._drain_refresh_queue)
 
     def _drain_refresh_queue(self) -> None:
-        latest = None
+        had_items = False
         while True:
             try:
-                latest = self._refresh_queue.get_nowait()
+                payload = self._refresh_queue.get_nowait()
             except queue.Empty:
                 break
+            had_items = True
 
-        if latest is None:
+            kind = payload[0]
+            serial = payload[1]
+            if serial != self._refresh_serial:
+                continue
+
+            if kind == "pc":
+                files, pc_error = payload[2], payload[3]
+                self._populate_pc_tree(files, pc_error)
+                self._refresh_pc_loaded = True
+                if not self._refresh_rc_loaded:
+                    self._set_status("PC files loaded. Loading RC-2 missions...")
+                continue
+
+            if kind == "rc":
+                missions, rc2_error, preview_data = payload[2], payload[3], payload[4]
+                self._populate_rc2_tree(missions, rc2_error, preview_data)
+                self._refresh_rc_loaded = True
+                if not self._refresh_pc_loaded:
+                    self._set_status("RC-2 missions loaded. Loading PC files...")
+                continue
+
+            if kind == "error":
+                worker_error = payload[2]
+                self._refresh_active = False
+                self._set_status("✘  Refresh failed.", colour=_ERROR)
+                self._set_busy(False, "")
+                self._log(f"Background refresh failed: {worker_error}", level="ERROR")
+                continue
+
+            if kind == "done":
+                elapsed_ms = payload[2]
+                self._refresh_active = False
+                self._refresh_mapping()
+                self._update_connection_mode()
+                self._set_status("Ready.")
+                self._set_busy(False, "")
+                self._log(f"Refresh time: {elapsed_ms} ms", level="DEBUG")
+                self._log("Lists refreshed.")
+
+                if self._refresh_pending:
+                    self._refresh_pending = False
+                    self._root.after(10, self._refresh)
+
+        if self._refresh_active and not had_items:
             self._root.after(50, self._drain_refresh_queue)
             return
 
-        serial, missions, rc2_error, files, pc_error, preview_data, worker_error, elapsed_ms = latest
-        if serial != self._refresh_serial:
+        if self._refresh_active:
             self._root.after(50, self._drain_refresh_queue)
-            return
-
-        if worker_error:
-            self._set_status("✘  Refresh failed.", colour=_ERROR)
-            self._set_busy(False, "")
-            self._log(f"Background refresh failed: {worker_error}", level="ERROR")
-            return
-
-        self._populate_rc2_tree(missions, rc2_error, preview_data)
-        self._populate_pc_tree(files, pc_error)
-        self._refresh_mapping()
-        self._update_connection_mode()
-        self._set_status("Ready.")
-        self._set_busy(False, "")
-        self._log(f"Refresh time: {elapsed_ms} ms", level="DEBUG")
-        self._log("Lists refreshed.")
-
-        if self._refresh_pending:
-            self._refresh_pending = False
-            self._root.after(10, self._refresh)
 
     def _populate_rc2_tree(
         self,
@@ -884,8 +982,38 @@ class MainView:
     def _populate_pc_tree(self, files: list[KMZFile], last_error: str | None) -> None:
         for row in self._pc_tree.get_children():
             self._pc_tree.delete(row)
+        self._pc_files_by_item = {}
+
+        # Build folder hierarchy from relative file paths.
+        folders: dict[str, str] = {}
         for f in files:
-            self._pc_tree.insert("", tk.END, values=(f.filename,))
+            parts = [part for part in f.filename.replace("\\", "/").split("/") if part]
+            if not parts:
+                continue
+
+            parent_path = ""
+            parent_id = ""
+            for folder_name in parts[:-1]:
+                parent_path = f"{parent_path}/{folder_name}" if parent_path else folder_name
+                folder_id = folders.get(parent_path)
+                if folder_id is None:
+                    folder_id = self._pc_tree.insert(
+                        parent_id if parent_id else "",
+                        tk.END,
+                        text=folder_name,
+                        open=True,
+                    )
+                    folders[parent_path] = folder_id
+                parent_id = folder_id
+
+            kmz_name = parts[-1]
+            item_id = self._pc_tree.insert(
+                parent_id if parent_id else "",
+                tk.END,
+                values=(kmz_name,),
+                tags=("file",),
+            )
+            self._pc_files_by_item[item_id] = f
         self._log(f"PC KMZ files loaded: {len(files)}")
         if last_error:
             self._log(last_error, level="ERROR")
@@ -930,7 +1058,19 @@ class MainView:
         sel = self._pc_tree.selection()
         if not sel:
             return None
-        filename  = self._pc_tree.item(sel[0], "values")[0]
+        item_id = sel[0]
+        mapped = self._pc_files_by_item.get(item_id)
+        if mapped is not None:
+            return mapped
+
+        item = self._pc_tree.item(item_id)
+        values = item.get("values", ())
+
+        # Only allow selection of file nodes (which have values)
+        if not values:
+            return None
+
+        filename = values[0]
         full_path = os.path.join(self._vm.pc_folder, filename)
         return KMZFile(filename=filename, full_path=full_path)
 
