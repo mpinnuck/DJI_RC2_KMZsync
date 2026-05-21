@@ -37,11 +37,15 @@ class SyncViewModel:
     _RC2_NON_MISSION_FOLDERS = {"capability", "map_preview"}
     COPY_MAP_FILE = "kmz_copy_map.json"
 
-    def __init__(self, config: ConfigManager):
+    def __init__(self, config: ConfigManager, copy_map_path: str | None = None):
         self._config = config
         self._last_error: str | None = None
         self._mtp_preview_items_cache: dict[str, List[dict[str, Any]]] = {}
-        self._copy_map_path = os.path.join(os.getcwd(), self.COPY_MAP_FILE)
+        if copy_map_path:
+            self._copy_map_path = copy_map_path
+        else:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            self._copy_map_path = os.path.join(base_dir, self.COPY_MAP_FILE)
 
     @staticmethod
     def _now_iso() -> str:

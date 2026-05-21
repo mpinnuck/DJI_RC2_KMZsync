@@ -23,7 +23,8 @@ def _make_vm(rc2_root: str = "", pc_root: str = "") -> SyncViewModel:
     cfg = ConfigManager.__new__(ConfigManager)
     cfg._config = {"rc2_folder": rc2_root, "pc_folder": pc_root}
     cfg.save = lambda: None
-    return SyncViewModel(cfg)
+    map_path = os.path.join(tempfile.mkdtemp(), "kmz_copy_map_test.json")
+    return SyncViewModel(cfg, copy_map_path=map_path)
 
 
 def _write(path: str, content: bytes = b"KMZ_DATA") -> None:
@@ -744,6 +745,62 @@ class TestExecuteCopyMtp(unittest.TestCase):
         ok, _ = self._vm.execute_copy(mission, KMZFile("source.kmz", src))
         self.assertTrue(ok)
         self.assertEqual(os.path.basename(captured["source_path"]), "guid-002.kmz")
+
+
+class TestCopyMapping(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._vm = _make_vm()
+        self._vm._copy_map_path = os.path.join(self._tmp, "test_map.json")
+
+    def _mission(self) -> RC2Mission:
+        return RC2Mission("guid-1", "target.kmz", "/slot/guid-1")
+
+    def test_record_creates_entry(self):
+        mission = self._mission()
+        kmz = KMZFile("source.kmz", "/pc/source.kmz")
+
+        self._vm._record_copy_mapping(kmz, mission, "target.kmz")
+        rows, _, _ = self._vm.get_copy_mapping_summary()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source_filename"], "source.kmz")
+        self.assertEqual(rows[0]["target_mission_guid"], "guid-1")
+
+    def test_history_capped_at_25(self):
+        mission = self._mission()
+        for i in range(30):
+            kmz = KMZFile("source.kmz", f"/pc/source_{i}.kmz")
+            self._vm._record_copy_mapping(kmz, mission, "target.kmz")
+
+        payload = self._vm._load_copy_map()
+        history = payload["by_source"]["source.kmz"]["history"]
+        self.assertEqual(len(history), 25)
+
+    def test_corrupt_map_file_returns_empty_summary(self):
+        with open(self._vm._copy_map_path, "w", encoding="utf-8") as fh:
+            fh.write("{ not valid json }")
+
+        rows, _, _ = self._vm.get_copy_mapping_summary()
+        self.assertEqual(rows, [])
+
+    def test_summary_sorted_newest_first(self):
+        mission = self._mission()
+        timestamps = iter([
+            "2026-01-01 10:00:00",
+            "2026-01-01 10:00:00",
+            "2026-01-01 10:00:01",
+            "2026-01-01 10:00:01",
+        ])
+        self._vm._now_iso = lambda: next(timestamps)
+
+        self._vm._record_copy_mapping(KMZFile("a.kmz", "/pc/a.kmz"), mission, "target.kmz")
+        self._vm._record_copy_mapping(KMZFile("b.kmz", "/pc/b.kmz"), mission, "target.kmz")
+
+        rows, _, _ = self._vm.get_copy_mapping_summary()
+        self.assertEqual(rows[0]["source_filename"], "b.kmz")
+        self.assertEqual(rows[1]["source_filename"], "a.kmz")
 
 
 if __name__ == "__main__":

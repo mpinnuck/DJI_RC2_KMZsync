@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v1.3"
+_APP_VERSION = "v1.4"
 
 
 try:
@@ -66,6 +66,7 @@ class MainView:
         self._refresh_active = False
         self._refresh_pc_loaded = False
         self._refresh_rc_loaded = False
+        self._refresh_error_seen = False
         self._busy = False
         self._copy_in_progress = False
         self._inspect_in_progress = False
@@ -162,6 +163,15 @@ class MainView:
             fg=_TEXT_DIM,
             font=_FONT_SMALL,
         ).pack(side=tk.LEFT, padx=4, pady=10)
+
+        # Refresh button (right side)
+        ttk.Button(
+            header,
+            text="Refresh",
+            command=self._refresh,
+            style="Accent.TButton"
+        ).pack(side=tk.RIGHT, padx=(0, 8), pady=8)
+
         self._mode_var = tk.StringVar(value="Mode: Not Set")
         self._mode_label = tk.Label(
             header,
@@ -595,8 +605,6 @@ class MainView:
 
         if target_kmz is None:
             default_name = f"{mission.guid}.kmz"
-            default_path = os.path.join(self._vm.pc_folder, default_name)
-            target_kmz = KMZFile(filename=default_name, full_path=default_path)
             self._log(
                 f"Copy-back target not selected. Defaulting target filename to {default_name}",
                 level="INFO",
@@ -819,6 +827,7 @@ class MainView:
         self._refresh_active = True
         self._refresh_pc_loaded = False
         self._refresh_rc_loaded = False
+        self._refresh_error_seen = False
         self._set_busy(True, "Please wait initializing...")
         self._set_status("Please wait initializing...")
         self._log("Initializing mission and file lists...", level="INFO")
@@ -909,6 +918,7 @@ class MainView:
             if kind == "error":
                 worker_error = payload[2]
                 self._refresh_active = False
+                self._refresh_error_seen = True
                 self._set_status("✘  Refresh failed.", colour=_ERROR)
                 self._set_busy(False, "")
                 self._log(f"Background refresh failed: {worker_error}", level="ERROR")
@@ -917,12 +927,13 @@ class MainView:
             if kind == "done":
                 elapsed_ms = payload[2]
                 self._refresh_active = False
-                self._refresh_mapping()
-                self._update_connection_mode()
-                self._set_status("Ready.")
-                self._set_busy(False, "")
-                self._log(f"Refresh time: {elapsed_ms} ms", level="DEBUG")
-                self._log("Lists refreshed.")
+                if not self._refresh_error_seen:
+                    self._refresh_mapping()
+                    self._update_connection_mode()
+                    self._set_status("Ready.")
+                    self._set_busy(False, "")
+                    self._log(f"Refresh time: {elapsed_ms} ms", level="DEBUG")
+                    self._log("Lists refreshed.")
 
                 if self._refresh_pending:
                     self._refresh_pending = False
