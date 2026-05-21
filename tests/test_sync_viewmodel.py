@@ -318,24 +318,79 @@ class TestExecuteCopy(unittest.TestCase):
         with open(kmz.full_path, "rb") as fh:
             self.assertEqual(fh.read(), b"ORIGINAL")
 
-    def test_create_new_mission_creates_new_slot_folder(self):
-        mission = self._slot("guid-007", "existing.kmz")
-        kmz = self._source("newcopy.kmz", b"NEWDATA")
+    def test_copy_back_overwrites_selected_pc_filename(self):
+        mission = self._slot("guid-008", "edited_on_rc2.kmz")
+        with open(os.path.join(mission.full_folder_path, "edited_on_rc2.kmz"), "wb") as fh:
+            fh.write(b"RC2_EDITED")
 
-        before = set(os.listdir(self._rc2))
-        ok, msg = self._vm.execute_copy(mission, kmz, create_new_mission=True)
+        target = self._source("dronelink_target.kmz", b"ORIGINAL")
+        ok, _ = self._vm.execute_copy_from_mission(mission, target)
+
+        self.assertTrue(ok)
+        with open(target.full_path, "rb") as fh:
+            self.assertEqual(fh.read(), b"RC2_EDITED")
+
+    def test_copy_back_uses_first_slot_kmz_when_name_missing(self):
+        mission = self._slot("guid-009")
+        source_in_slot = os.path.join(mission.full_folder_path, "from_slot.kmz")
+        with open(source_in_slot, "wb") as fh:
+            fh.write(b"FROM_SLOT")
+        mission = RC2Mission(guid="guid-009", kmz_name="", full_folder_path=mission.full_folder_path)
+
+        target = self._source("target_name.kmz", b"OLD")
+        ok, _ = self._vm.execute_copy_from_mission(mission, target)
+
+        self.assertTrue(ok)
+        with open(target.full_path, "rb") as fh:
+            self.assertEqual(fh.read(), b"FROM_SLOT")
+
+    def test_copy_back_fails_when_slot_has_no_kmz(self):
+        mission = self._slot("guid-010")
+        target = self._source("target_name.kmz", b"OLD")
+
+        ok, msg = self._vm.execute_copy_from_mission(mission, target)
+
+        self.assertFalse(ok)
+        self.assertIn("no kmz", msg.lower())
+
+    def test_copy_back_without_target_selection_uses_guid_filename(self):
+        mission = self._slot("guid-011", "edited_on_rc2.kmz")
+        with open(os.path.join(mission.full_folder_path, "edited_on_rc2.kmz"), "wb") as fh:
+            fh.write(b"RC2_TO_GUID")
+
+        ok, _ = self._vm.execute_copy_from_mission(mission, None)
         self.assertTrue(ok)
 
-        after = set(os.listdir(self._rc2))
-        added = list(after - before)
-        self.assertEqual(len(added), 1)
+        dest_path = os.path.join(self._pc, "guid-011.kmz")
+        self.assertTrue(os.path.isfile(dest_path))
+        with open(dest_path, "rb") as fh:
+            self.assertEqual(fh.read(), b"RC2_TO_GUID")
 
-        new_guid = added[0]
-        new_path = os.path.join(self._rc2, new_guid, f"{new_guid}.kmz")
-        self.assertTrue(os.path.isfile(new_path))
-        with open(new_path, "rb") as fh:
-            self.assertEqual(fh.read(), b"NEWDATA")
-        self.assertIn(new_guid, msg)
+    def test_delete_selected_rc2_mission_removes_folder(self):
+        mission = self._slot("guid-del-001", "existing.kmz")
+        self.assertTrue(os.path.isdir(mission.full_folder_path))
+
+        ok, _ = self._vm.delete_rc2_mission(mission)
+
+        self.assertTrue(ok)
+        self.assertFalse(os.path.exists(mission.full_folder_path))
+
+    def test_delete_selected_pc_kmz_removes_file(self):
+        kmz = self._source("delete_me.kmz", b"TO_DELETE")
+        self.assertTrue(os.path.isfile(kmz.full_path))
+
+        ok, _ = self._vm.delete_pc_kmz_file(kmz)
+
+        self.assertTrue(ok)
+        self.assertFalse(os.path.exists(kmz.full_path))
+
+    def test_delete_selected_pc_kmz_fails_when_missing(self):
+        kmz = KMZFile(filename="missing.kmz", full_path=os.path.join(self._pc, "missing.kmz"))
+
+        ok, msg = self._vm.delete_pc_kmz_file(kmz)
+
+        self.assertFalse(ok)
+        self.assertIn("not found", msg.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -689,37 +744,6 @@ class TestExecuteCopyMtp(unittest.TestCase):
         ok, _ = self._vm.execute_copy(mission, KMZFile("source.kmz", src))
         self.assertTrue(ok)
         self.assertEqual(os.path.basename(captured["source_path"]), "guid-002.kmz")
-
-    def test_create_new_mtp_mission_creates_new_guid_slot(self):
-        src = os.path.join(self._pc, "source.kmz")
-        _write(src, b"DATA")
-        mission = RC2Mission(
-            guid="guid-003",
-            kmz_name="existing.kmz",
-            full_folder_path=f"{SyncViewModel.DEFAULT_MTP_RC2_ROOT}|guid-003",
-        )
-        created = {}
-        copied = {}
-
-        def fake_create(root: str, guid: str):
-            created["root"] = root
-            created["guid"] = guid
-            return True, guid
-
-        def fake_copy(folder: str, source_path: str):
-            copied["folder"] = folder
-            copied["source_path"] = source_path
-            return True, os.path.basename(source_path)
-
-        self._vm._create_mtp_slot_folder = fake_create
-        self._vm._copy_file_to_mtp_folder = fake_copy
-
-        ok, msg = self._vm.execute_copy(mission, KMZFile("source.kmz", src), create_new_mission=True)
-        self.assertTrue(ok)
-        self.assertEqual(created["root"], SyncViewModel.DEFAULT_MTP_RC2_ROOT)
-        self.assertTrue(copied["folder"].endswith(f"|{created['guid']}"))
-        self.assertEqual(os.path.basename(copied["source_path"]), f"{created['guid']}.kmz")
-        self.assertIn(created["guid"], msg)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog
 
-_APP_VERSION = "v1.1"
+_APP_VERSION = "v1.2"
 
 
 try:
@@ -59,6 +59,7 @@ class MainView:
         self._refresh_queue: queue.Queue = queue.Queue()
         self._copy_queue: queue.Queue = queue.Queue()
         self._inspect_queue: queue.Queue = queue.Queue()
+        self._mapping_rows: list[dict[str, str]] = []
         self._refresh_serial = 0
         self._busy = False
         self._copy_in_progress = False
@@ -199,6 +200,9 @@ class MainView:
         self._rc2_tree = self._mission_panel(main)
         self._copy_button_panel(main)
         self._pc_tree  = self._kmz_panel(main)
+        self._bind_tree_clear_on_blank(self._rc2_tree)
+        self._bind_tree_clear_on_blank(self._pc_tree)
+        self._root.bind("<Escape>", self._clear_all_selections)
 
         # Status bar
         self._status_var = tk.StringVar(value="Ready.")
@@ -208,9 +212,15 @@ class MainView:
         self._status_label.pack(fill=tk.X, padx=14, pady=(0, 6))
 
         # Activity log panel
-        log_panel = tk.Frame(self._root, bg=_PANEL_BG, highlightthickness=1,
-                             highlightbackground=_LOG_BORDER, highlightcolor=_LOG_BORDER)
-        log_panel.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 10))
+        bottom_tabs = ttk.Notebook(self._root)
+        bottom_tabs.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 10))
+
+        log_panel = tk.Frame(bottom_tabs, bg=_PANEL_BG, highlightthickness=1,
+                     highlightbackground=_LOG_BORDER, highlightcolor=_LOG_BORDER)
+        mapping_panel = tk.Frame(bottom_tabs, bg=_PANEL_BG, highlightthickness=1,
+                     highlightbackground=_LOG_BORDER, highlightcolor=_LOG_BORDER)
+        bottom_tabs.add(log_panel, text="Activity Log")
+        bottom_tabs.add(mapping_panel, text="Mission Mapping")
 
         log_header = tk.Frame(log_panel, bg=_PANEL_BG)
         log_header.pack(fill=tk.X, padx=8, pady=(6, 2))
@@ -264,7 +274,90 @@ class MainView:
         self._log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # Mission mapping tab
+        mapping_header = tk.Frame(mapping_panel, bg=_PANEL_BG)
+        mapping_header.pack(fill=tk.X, padx=8, pady=(6, 2))
+        tk.Label(
+            mapping_header,
+            text="Latest Source → RC-2 Mission Mapping",
+            bg=_PANEL_BG,
+            fg=_TEXT_DIM,
+            font=_FONT_SMALL,
+            anchor=tk.W,
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            mapping_header,
+            text="Refresh Mapping",
+            command=self._refresh_mapping,
+        ).pack(side=tk.RIGHT)
+
+        self._mapping_updated_var = tk.StringVar(value="Updated: n/a")
+        tk.Label(
+            mapping_panel,
+            textvariable=self._mapping_updated_var,
+            bg=_PANEL_BG,
+            fg=_TEXT_DIM,
+            font=_FONT_SMALL,
+            anchor=tk.W,
+        ).pack(fill=tk.X, padx=10, pady=(0, 2))
+
+        self._mapping_note_var = tk.StringVar(value="")
+        tk.Label(
+            mapping_panel,
+            textvariable=self._mapping_note_var,
+            bg=_PANEL_BG,
+            fg=_TEXT_DIM,
+            font=_FONT_SMALL,
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=1200,
+        ).pack(fill=tk.X, padx=10, pady=(0, 6))
+
+        mapping_body = tk.Frame(mapping_panel, bg=_PANEL_BG)
+        mapping_body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self._mapping_tree = ttk.Treeview(
+            mapping_body,
+            columns=("source", "mission", "target", "mode", "copied"),
+            show="headings",
+            selectmode="browse",
+        )
+        self._mapping_tree.heading("source", text="Source KMZ")
+        self._mapping_tree.heading("mission", text="Mission GUID")
+        self._mapping_tree.heading("target", text="Saved As")
+        self._mapping_tree.heading("mode", text="Mode")
+        self._mapping_tree.heading("copied", text="Copied At")
+        self._mapping_tree.column("source", width=300, stretch=True)
+        self._mapping_tree.column("mission", width=300, stretch=True)
+        self._mapping_tree.column("target", width=240, stretch=True)
+        self._mapping_tree.column("mode", width=100, stretch=False, anchor=tk.CENTER)
+        self._mapping_tree.column("copied", width=180, stretch=False)
+        map_scroll = ttk.Scrollbar(mapping_body, orient="vertical", command=self._mapping_tree.yview)
+        self._mapping_tree.configure(yscrollcommand=map_scroll.set)
+        self._mapping_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        map_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._bind_tree_clear_on_blank(self._mapping_tree)
+
         self._log("Application started.")
+        self._refresh_mapping()
+
+    def _bind_tree_clear_on_blank(self, tree: ttk.Treeview) -> None:
+        tree.bind("<Button-1>", lambda event, tv=tree: self._clear_tree_selection_if_blank(tv, event), add="+")
+
+    @staticmethod
+    def _clear_tree_selection_if_blank(tree: ttk.Treeview, event) -> None:
+        region = tree.identify("region", event.x, event.y)
+        row_id = tree.identify_row(event.y)
+        if region in ("tree", "cell") and row_id:
+            return
+        tree.selection_remove(tree.selection())
+        tree.focus("")
+
+    def _clear_all_selections(self, _event=None):
+        for tree in (self._rc2_tree, self._pc_tree, self._mapping_tree):
+            tree.selection_remove(tree.selection())
+            tree.focus("")
+        self._set_status("Selections cleared.", colour=_TEXT_DIM)
+        return "break"
 
     # ------------------------------------------------------------------
     # Path row helper
@@ -292,18 +385,31 @@ class MainView:
         frame = tk.Frame(parent, bg=_PANEL_BG)
         frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        tk.Label(frame, text="DJI RC-2  —  Mission Slots",
-                 bg=_PANEL_BG, fg=_ACCENT, font=_FONT_TITLE).pack(
-            anchor=tk.W, padx=10, pady=(8, 2))
-        tk.Label(frame, text="Filter by mission name, GUID, or timestamp",
-                 bg=_PANEL_BG, fg=_TEXT_DIM, font=_FONT_SMALL).pack(
-            anchor=tk.W, padx=10, pady=(0, 4))
+        # Configure grid rows: top (fixed), middle (expanding), bottom (fixed)
+        frame.grid_rowconfigure(1, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
 
-        filter_entry = ttk.Entry(frame, textvariable=self._rc2_filter_var)
-        filter_entry.pack(fill=tk.X, padx=10, pady=(0, 6))
+        # Top section - labels and filter
+        top_frame = tk.Frame(frame, bg=_PANEL_BG)
+        top_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 2))
+
+        tk.Label(top_frame, text="DJI RC-2  —  Mission Slots",
+                 bg=_PANEL_BG, fg=_ACCENT, font=_FONT_TITLE).pack(anchor=tk.W)
+        tk.Label(top_frame, text="Filter by mission name, GUID, or timestamp",
+                 bg=_PANEL_BG, fg=_TEXT_DIM, font=_FONT_SMALL).pack(
+            anchor=tk.W, pady=(0, 4))
+
+        filter_entry = ttk.Entry(top_frame, textvariable=self._rc2_filter_var)
+        filter_entry.pack(fill=tk.X, pady=(0, 6))
         filter_entry.bind("<KeyRelease>", lambda _event: self._render_rc2_tree())
 
-        tree = ttk.Treeview(frame, columns=("slot",),
+        # Middle section - tree with scrollbar
+        tree_frame = tk.Frame(frame, bg=_PANEL_BG)
+        tree_frame.grid(row=1, column=0, sticky="nsew", padx=(6, 0), pady=(0, 6))
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        tree = ttk.Treeview(tree_frame, columns=("slot",),
                     show="tree headings", selectmode="browse",
                     style="Mission.Treeview")
         tree.heading("#0", text="Preview")
@@ -312,10 +418,17 @@ class MainView:
         tree.column("slot", width=420, stretch=True)
         tree.tag_configure("empty", foreground=_TEXT_DIM)
 
-        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 4), pady=(0, 6))
-        tree.pack(fill=tk.BOTH, expand=True, padx=(6, 0), pady=(0, 6))
+        vsb.grid(row=0, column=1, sticky="ns", padx=(0, 4))
+        tree.grid(row=0, column=0, sticky="nsew")
+
+        # Bottom section - delete button
+        bottom_frame = tk.Frame(frame, bg=_PANEL_BG)
+        bottom_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 8))
+        ttk.Button(bottom_frame, text="Delete Selected Mission", command=self._delete_selected_mission).pack(
+            fill=tk.X
+        )
 
         return tree
 
@@ -330,6 +443,8 @@ class MainView:
         tk.Frame(frame, bg=_BG).pack(expand=True, fill=tk.BOTH)
         ttk.Button(frame, text="COPY  ◀", style="Accent.TButton",
                    command=self._on_copy).pack(padx=8, pady=4)
+        ttk.Button(frame, text="COPY  ▶",
+                   command=self._on_copy_back).pack(padx=8, pady=4)
         tk.Label(frame, text="select one\nfrom each\npanel",
                  bg=_BG, fg=_TEXT_DIM, font=_FONT_SMALL,
                  justify=tk.CENTER).pack(pady=(6, 0))
@@ -342,22 +457,42 @@ class MainView:
         frame = tk.Frame(parent, bg=_PANEL_BG)
         frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        tk.Label(frame, text="PC Source  —  Dronelink KMZ Files",
-                 bg=_PANEL_BG, fg=_ACCENT2, font=_FONT_TITLE).pack(
-            anchor=tk.W, padx=10, pady=(8, 2))
-        tk.Label(frame, text="select the mission to inject",
-                 bg=_PANEL_BG, fg=_TEXT_DIM, font=_FONT_SMALL).pack(
-            anchor=tk.W, padx=10, pady=(0, 4))
+        # Configure grid rows: top (fixed), middle (expanding), bottom (fixed)
+        frame.grid_rowconfigure(1, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
 
-        tree = ttk.Treeview(frame, columns=("filename",),
+        # Top section - labels
+        top_frame = tk.Frame(frame, bg=_PANEL_BG)
+        top_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 2))
+
+        tk.Label(top_frame, text="PC Source  —  Dronelink KMZ Files",
+                 bg=_PANEL_BG, fg=_ACCENT2, font=_FONT_TITLE).pack(anchor=tk.W)
+        tk.Label(top_frame, text="select the mission to inject",
+                 bg=_PANEL_BG, fg=_TEXT_DIM, font=_FONT_SMALL).pack(
+            anchor=tk.W, pady=(0, 4))
+
+        # Middle section - tree with scrollbar
+        tree_frame = tk.Frame(frame, bg=_PANEL_BG)
+        tree_frame.grid(row=1, column=0, sticky="nsew", padx=(6, 0), pady=(0, 6))
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        tree = ttk.Treeview(tree_frame, columns=("filename",),
                             show="headings", selectmode="browse")
         tree.heading("filename", text="KMZ Filename")
         tree.column("filename", width=300, stretch=True)
 
-        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 4), pady=(0, 6))
-        tree.pack(fill=tk.BOTH, expand=True, padx=(6, 0), pady=(0, 6))
+        vsb.grid(row=0, column=1, sticky="ns", padx=(0, 4))
+        tree.grid(row=0, column=0, sticky="nsew")
+
+        # Bottom section - delete button
+        bottom_frame = tk.Frame(frame, bg=_PANEL_BG)
+        bottom_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 8))
+        ttk.Button(bottom_frame, text="Delete Selected KMZ", command=self._delete_selected_kmz).pack(
+            fill=tk.X
+        )
 
         return tree
 
@@ -397,23 +532,22 @@ class MainView:
             return
 
         if mission is None:
-            self._set_status("Select an existing RC-2 mission slot first.", colour=_ERROR)
+            self._set_status("Select an existing RC-2 mission first.", colour=_ERROR)
             self._log(
-                "Copy blocked: no RC-2 mission selected. RC-2 does not reliably index synthetic slot folders; use overwrite of an existing slot.",
+                "Copy blocked: no RC-2 mission selected. RC-2 does not reliably index synthetic mission folders; use overwrite of an existing mission.",
                 level="WARN",
             )
             return
 
-        create_new_mission = False
         dest_filename = mission.kmz_name if mission.kmz_name else f"{mission.guid}.kmz"
-        self._log(f"Copy requested: {kmz_file.filename} -> slot {mission.guid}", level="INFO")
+        self._log(f"Copy requested: {kmz_file.filename} -> mission {mission.guid}", level="INFO")
         self._log(
             f"Copy started: source={kmz_file.full_path} | destination={mission.full_folder_path}\\{dest_filename}",
             level="INFO",
         )
         if mission.kmz_name:
             self._log(
-                f"Selected slot contains '{mission.kmz_name}'. Performing silent overwrite.",
+                f"Selected mission contains '{mission.kmz_name}'. Performing silent overwrite.",
                 level="INFO",
             )
         self._log(self._vm.confirm_copy_message(mission, kmz_file).replace("\n", " | "), level="INFO")
@@ -428,7 +562,6 @@ class MainView:
                 ok, msg = self._vm.execute_copy(
                     mission,
                     kmz_file,
-                    create_new_mission=create_new_mission,
                 )
             except Exception as exc:
                 ok, msg = False, f"Unhandled copy error: {exc}"
@@ -437,6 +570,82 @@ class MainView:
 
         threading.Thread(target=_worker, daemon=True).start()
         self._root.after(50, self._drain_copy_queue)
+
+    def _on_copy_back(self) -> None:
+        if self._copy_in_progress:
+            self._set_status("Copy already in progress...", colour=_TEXT_DIM)
+            self._log("Copy-back request ignored: copy is already in progress.", level="WARN")
+            return
+
+        mission = self._selected_mission()
+        target_kmz = self._selected_kmz()
+
+        if mission is None:
+            self._set_status("Select an existing RC-2 mission first.", colour=_ERROR)
+            self._log("Copy-back blocked: no RC-2 mission selected.", level="WARN")
+            return
+
+        if target_kmz is None:
+            default_name = f"{mission.guid}.kmz"
+            default_path = os.path.join(self._vm.pc_folder, default_name)
+            target_kmz = KMZFile(filename=default_name, full_path=default_path)
+            self._log(
+                f"Copy-back target not selected. Defaulting target filename to {default_name}",
+                level="INFO",
+            )
+
+        self._log(f"Copy-back requested: mission {mission.guid} -> {target_kmz.filename}", level="INFO")
+        self._set_busy(True, "Copying mission back to PC...")
+        self._set_status("Copy-back in progress...", colour=_TEXT_DIM)
+        self._copy_in_progress = True
+
+        def _worker() -> None:
+            started = time.monotonic()
+            try:
+                ok, msg = self._vm.execute_copy_from_mission(mission, target_kmz)
+            except Exception as exc:
+                ok, msg = False, f"Unhandled copy-back error: {exc}"
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._copy_queue.put((ok, msg, elapsed_ms))
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._root.after(50, self._drain_copy_queue)
+
+    def _delete_selected_mission(self) -> None:
+        mission = self._selected_mission()
+        if mission is None:
+            self._set_status("Select an RC-2 mission to delete.", colour=_ERROR)
+            self._log("Delete blocked: no RC-2 mission selected.", level="WARN")
+            return
+
+        ok, msg = self._vm.delete_rc2_mission(mission)
+        if ok:
+            self._set_status("Mission deleted.", colour=_SUCCESS)
+            self._log(msg, level="OK")
+            self._refresh()
+            return
+
+        self._set_status("✘  Mission delete failed.", colour=_ERROR)
+        self._log(msg.replace("\n", " | "), level="ERROR")
+
+    def _delete_selected_kmz(self) -> None:
+        kmz_file = self._selected_kmz()
+        if kmz_file is None:
+            self._set_status("Select a Dronelink KMZ file to delete.", colour=_ERROR)
+            self._log("Delete blocked: no PC KMZ selected.", level="WARN")
+            return
+
+        ok, msg = self._vm.delete_pc_kmz_file(kmz_file)
+        if ok:
+            self._set_status("KMZ file deleted.", colour=_SUCCESS)
+            self._log(msg, level="OK")
+            files = self._vm.load_pc_kmz_files()
+            pc_error = self._vm.consume_last_error()
+            self._populate_pc_tree(files, pc_error)
+            return
+
+        self._set_status("✘  KMZ delete failed.", colour=_ERROR)
+        self._log(msg.replace("\n", " | "), level="ERROR")
 
     def _drain_copy_queue(self) -> None:
         latest = None
@@ -459,6 +668,7 @@ class MainView:
             self._set_status(f"✔  {msg.splitlines()[0]}", colour=_SUCCESS)
             self._log(msg.replace("\n", " | "), level="OK")
             self._log(f"Copy completed in {elapsed_ms} ms", level="DEBUG")
+            self._refresh_mapping()
             self._refresh()
             return
 
@@ -485,14 +695,14 @@ class MainView:
 
         mission = self._selected_mission()
         if mission is None:
-            self._set_status("Select an RC-2 mission slot to inspect.", colour=_ERROR)
+            self._set_status("Select an RC-2 mission to inspect.", colour=_ERROR)
             self._log("Inspect blocked: no RC-2 mission selected.", level="WARN")
             return
 
         self._inspect_in_progress = True
         self._set_busy(True, "Inspecting selected mission...")
         self._set_status("Inspecting selected mission...", colour=_TEXT_DIM)
-        self._log(f"Inspect mission requested for slot {mission.guid}", level="INFO")
+        self._log(f"Inspect mission requested for mission {mission.guid}", level="INFO")
 
         def _worker() -> None:
             ok, details = self._vm.inspect_mission_storage(mission)
@@ -616,6 +826,7 @@ class MainView:
 
         self._populate_rc2_tree(missions, rc2_error, preview_data)
         self._populate_pc_tree(files, pc_error)
+        self._refresh_mapping()
         self._update_connection_mode()
         self._set_status("Ready.")
         self._set_busy(False, "")
@@ -640,9 +851,9 @@ class MainView:
         active_filter = self._rc2_filter_var.get().strip()
         if active_filter:
             shown = len(self._rc2_tree.get_children())
-            self._set_status(f"Showing {shown} of {count} mission slots on RC-2.")
+            self._set_status(f"Showing {shown} of {count} missions on RC-2.")
         else:
-            self._set_status(f"{count} mission slot{'s' if count != 1 else ''} found on RC-2.")
+            self._set_status(f"{count} mission{'s' if count != 1 else ''} found on RC-2.")
         self._log(f"RC-2 missions loaded: {count}")
         if last_error:
             self._log(last_error, level="ERROR")
@@ -678,6 +889,28 @@ class MainView:
         self._log(f"PC KMZ files loaded: {len(files)}")
         if last_error:
             self._log(last_error, level="ERROR")
+
+    def _refresh_mapping(self) -> None:
+        rows, updated_at, note = self._vm.get_copy_mapping_summary()
+        self._mapping_rows = rows
+        self._mapping_updated_var.set(f"Updated: {updated_at or 'n/a'}")
+        self._mapping_note_var.set(note)
+
+        for row_id in self._mapping_tree.get_children():
+            self._mapping_tree.delete(row_id)
+
+        for row in rows:
+            self._mapping_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row.get("source_filename", ""),
+                    row.get("target_mission_guid", ""),
+                    row.get("target_kmz_filename", ""),
+                    row.get("connection_mode", ""),
+                    row.get("copied_at", ""),
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Selection helpers — return model objects
@@ -727,7 +960,7 @@ class MainView:
 
     def _preview_image_for_mission(self, guid: str, image_data: bytes | None) -> tk.PhotoImage:
         if not image_data:
-            self._log(f"No preview bytes for slot {guid}, using placeholder.", level="DEBUG")
+            self._log(f"No preview bytes for mission {guid}, using placeholder.", level="DEBUG")
             return self._preview_placeholder_image()
 
         # Tk PhotoImage can fail for JPEG depending on Tcl/Tk build; Pillow
@@ -739,7 +972,7 @@ class MainView:
                     rendered.thumbnail((80, 60))
                     image = ImageTk.PhotoImage(rendered)
                 self._mission_preview_images[guid] = image
-                self._log(f"Successfully loaded image for slot: {guid}", level="DEBUG")
+                self._log(f"Successfully loaded image for mission: {guid}", level="DEBUG")
                 return image
             except Exception as e:
                 self._log(f"Failed to decode preview bytes for {guid}: {e}", level="ERROR")

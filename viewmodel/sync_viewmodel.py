@@ -35,11 +35,124 @@ class SyncViewModel:
     POWERSHELL_TIMEOUT_SECONDS = 5
     MTP_COPY_TIMEOUT_SECONDS = 30
     _RC2_NON_MISSION_FOLDERS = {"capability", "map_preview"}
+    COPY_MAP_FILE = "kmz_copy_map.json"
 
     def __init__(self, config: ConfigManager):
         self._config = config
         self._last_error: str | None = None
         self._mtp_preview_items_cache: dict[str, List[dict[str, Any]]] = {}
+        self._copy_map_path = os.path.join(os.getcwd(), self.COPY_MAP_FILE)
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _load_copy_map(self) -> dict[str, Any]:
+        if not os.path.isfile(self._copy_map_path):
+            return {
+                "updated_at": "",
+                "note": (
+                    "This map tracks file-level copy operations only. If RC-2 is opened with "
+                    "'adjust/open as new', DJI app metadata may create a new mission record that "
+                    "diverges from this mapping."
+                ),
+                "by_source": {},
+            }
+
+        try:
+            with open(self._copy_map_path, "r", encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if isinstance(loaded, dict):
+                loaded.setdefault("updated_at", "")
+                loaded.setdefault("note", "")
+                loaded.setdefault("by_source", {})
+                if not isinstance(loaded.get("by_source"), dict):
+                    loaded["by_source"] = {}
+                return loaded
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        return {
+            "updated_at": "",
+            "note": (
+                "This map tracks file-level copy operations only. If RC-2 is opened with "
+                "'adjust/open as new', DJI app metadata may create a new mission record that "
+                "diverges from this mapping."
+            ),
+            "by_source": {},
+        }
+
+    def _save_copy_map(self, payload: dict[str, Any]) -> None:
+        try:
+            with open(self._copy_map_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=4)
+        except OSError:
+            # Copy must still be considered successful even if map persistence fails.
+            return
+
+    def _record_copy_mapping(self, source: KMZFile, mission: RC2Mission, dest_filename: str) -> None:
+        payload = self._load_copy_map()
+        by_source = payload.get("by_source") if isinstance(payload.get("by_source"), dict) else {}
+        payload["by_source"] = by_source
+
+        source_key = source.filename
+        entry = by_source.get(source_key)
+        if not isinstance(entry, dict):
+            entry = {"history": []}
+
+        history = entry.get("history") if isinstance(entry.get("history"), list) else []
+        row = {
+            "copied_at": self._now_iso(),
+            "source_filename": source.filename,
+            "source_full_path": source.full_path,
+            "target_mission_guid": mission.guid,
+            "target_kmz_filename": dest_filename,
+            "target_folder_path": mission.full_folder_path,
+            "connection_mode": self.get_rc2_connection_mode(),
+        }
+        history.append(row)
+        entry["history"] = history[-25:]
+        entry["last"] = row
+        by_source[source_key] = entry
+
+        payload["updated_at"] = self._now_iso()
+        self._save_copy_map(payload)
+
+    def get_copy_mapping_summary(self) -> tuple[list[dict[str, str]], str, str]:
+        payload = self._load_copy_map()
+        by_source = payload.get("by_source") if isinstance(payload.get("by_source"), dict) else {}
+
+        rows: list[dict[str, str]] = []
+        for source_name, value in by_source.items():
+            if not isinstance(value, dict):
+                continue
+
+            last = value.get("last") if isinstance(value.get("last"), dict) else None
+            if not last:
+                history = value.get("history") if isinstance(value.get("history"), list) else []
+                if history:
+                    candidate = history[-1]
+                    if isinstance(candidate, dict):
+                        last = candidate
+            if not last:
+                continue
+
+            rows.append(
+                {
+                    "source_filename": str(last.get("source_filename") or source_name or ""),
+                    "source_full_path": str(last.get("source_full_path") or ""),
+                    "target_mission_guid": str(last.get("target_mission_guid") or ""),
+                    "target_kmz_filename": str(last.get("target_kmz_filename") or ""),
+                    "target_folder_path": str(last.get("target_folder_path") or ""),
+                    "connection_mode": str(last.get("connection_mode") or ""),
+                    "copied_at": str(last.get("copied_at") or ""),
+                }
+            )
+
+        rows.sort(key=lambda row: row.get("copied_at") or "", reverse=True)
+        updated_at = str(payload.get("updated_at") or "")
+        note = str(payload.get("note") or "")
+        return rows, updated_at, note
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -70,7 +183,7 @@ class SyncViewModel:
         return dt.strftime("%d/%m/%Y %H:%M:%S")
 
     @classmethod
-    def _format_local_mtime(path: str) -> str:
+    def _format_local_mtime(cls, path: str) -> str:
         try:
             ts = os.path.getmtime(path)
             return cls._format_display_datetime(datetime.fromtimestamp(ts))
@@ -1074,6 +1187,77 @@ if ($devices) {
 
         return files
 
+    def delete_rc2_mission(self, mission: RC2Mission) -> Tuple[bool, str]:
+        root = (self._config.rc2_folder or "").strip()
+
+        if self._is_mtp_path(root):
+            script = self._mtp_script(
+                root,
+                f"""
+$folderName = {self._ps_single_quote(mission.guid)}
+$item = $current.Items() | Where-Object {{ $_.Name -eq $folderName -and $_.IsFolder }} | Select-Object -First 1
+if (-not $item) {{
+    throw "Mission folder not found: $folderName"
+}}
+
+$item.InvokeVerb('delete')
+
+$deadline = (Get-Date).AddSeconds(15)
+do {{
+    $remaining = $current.Items() | Where-Object {{ $_.Name -eq $folderName -and $_.IsFolder }} | Select-Object -First 1
+    if (-not $remaining) {{
+        break
+    }}
+    [System.Threading.Thread]::Sleep(200)
+}} while ((Get-Date) -lt $deadline)
+
+$remaining = $current.Items() | Where-Object {{ $_.Name -eq $folderName -and $_.IsFolder }} | Select-Object -First 1
+if ($remaining) {{
+    throw "Mission folder delete did not complete: $folderName"
+}}
+
+Write-Output $folderName
+""",
+            )
+            ok, out = self._run_powershell(script, timeout_seconds=self.MTP_COPY_TIMEOUT_SECONDS)
+            if not ok:
+                return False, f"MTP delete failed:\n{out}"
+            return True, f"Deleted mission {mission.guid}"
+
+        if self._is_adb_path(root):
+            remote_root = self._adb_remote_root(root)
+            remote_slot = self._adb_remote_join(remote_root, mission.guid)
+            ok, out = self._run_adb(["shell", "rm", "-rf", remote_slot])
+            if not ok:
+                return False, f"ADB delete failed:\n{out}"
+            return True, f"Deleted mission {mission.guid}"
+
+        if not os.path.isdir(mission.full_folder_path):
+            return False, f"Mission folder not found:\n{mission.full_folder_path}"
+
+        try:
+            shutil.rmtree(mission.full_folder_path)
+        except OSError as e:
+            return False, f"File operation failed:\n{e}"
+
+        return True, f"Deleted mission {mission.guid}"
+
+    def delete_pc_kmz_file(self, kmz_file: KMZFile) -> Tuple[bool, str]:
+        pc_root = (self._config.pc_folder or "").strip()
+        if not pc_root or not os.path.isdir(pc_root):
+            return False, f"PC KMZ folder not found:\n{pc_root}"
+
+        file_path = kmz_file.full_path
+        if not os.path.isfile(file_path):
+            return False, f"KMZ file not found:\n{file_path}"
+
+        try:
+            os.remove(file_path)
+        except OSError as e:
+            return False, f"File operation failed:\n{e}"
+
+        return True, f"Deleted KMZ file {kmz_file.filename}"
+
     def get_adb_status(self) -> Tuple[bool, str]:
         """
         Return (ready, message) for current ADB device state.
@@ -1116,7 +1300,6 @@ if ($devices) {
         self,
         mission: RC2Mission,
         kmz_file: KMZFile,
-        create_new_mission: bool = False,
     ) -> Tuple[bool, str]:
         """
         Copy kmz_file into the mission's GUID slot, preserving the existing
@@ -1127,19 +1310,17 @@ if ($devices) {
         target_mission = mission
         dest_filename = mission.kmz_name if mission.kmz_name else f"{mission.guid}.kmz"
 
-        if create_new_mission:
-            ok_target, target_or_error = self._prepare_new_mission_target()
-            if not ok_target:
-                return False, target_or_error
-
-            target_mission = target_or_error
-            dest_filename = f"{target_mission.guid}.kmz"
-
         if self._is_mtp_path(self._config.rc2_folder):
-            return self._execute_copy_mtp(target_mission, kmz_file, dest_filename)
+            ok, msg = self._execute_copy_mtp(target_mission, kmz_file, dest_filename)
+            if ok:
+                self._record_copy_mapping(kmz_file, target_mission, dest_filename)
+            return ok, msg
 
         if self._is_adb_path(self._config.rc2_folder):
-            return self._execute_copy_adb(target_mission, kmz_file, dest_filename)
+            ok, msg = self._execute_copy_adb(target_mission, kmz_file, dest_filename)
+            if ok:
+                self._record_copy_mapping(kmz_file, target_mission, dest_filename)
+            return ok, msg
 
         dest_path = os.path.join(target_mission.full_folder_path, dest_filename)
 
@@ -1156,10 +1337,108 @@ if ($devices) {
         except OSError as e:
             return False, f"File operation failed:\n{e}"
 
+        self._record_copy_mapping(kmz_file, target_mission, dest_filename)
+
         return True, (
             f"Copied '{kmz_file.filename}'\n"
-            f"  → slot     : {target_mission.guid}\n"
+            f"  → mission  : {target_mission.guid}\n"
             f"  → saved as : {dest_filename}"
+        )
+
+    def execute_copy_from_mission(
+        self,
+        mission: RC2Mission,
+        target_kmz_file: KMZFile | None = None,
+    ) -> Tuple[bool, str]:
+        """
+        Copy the selected RC-2 mission KMZ back to the PC folder and save it
+        using the selected target filename.
+
+        Returns (success: bool, message: str).
+        """
+        pc_root = (self._config.pc_folder or "").strip()
+        if not pc_root or not os.path.isdir(pc_root):
+            return False, f"PC KMZ folder not found:\n{pc_root}"
+
+        source_filename = (mission.kmz_name or "").strip()
+        if not source_filename:
+            ok_list, listed = self._list_slot_files(mission)
+            if not ok_list:
+                return False, f"Failed to list mission files:\n{listed}"
+            names = listed if isinstance(listed, list) else []
+            kmz_candidates = sorted([name for name in names if name.lower().endswith(".kmz")])
+            if not kmz_candidates:
+                return False, "No KMZ found in selected RC-2 mission."
+            source_filename = kmz_candidates[0]
+
+        target_filename = target_kmz_file.filename if target_kmz_file is not None else f"{mission.guid}.kmz"
+        dest_path = os.path.join(pc_root, target_filename)
+        root = (self._config.rc2_folder or "").strip()
+
+        if self._is_mtp_path(root):
+            fd, temp_path = tempfile.mkstemp(prefix="djirc2kmzsync-copyback-", suffix=".kmz")
+            os.close(fd)
+            try:
+                ok, out = self._copy_file_from_mtp_folder(mission.full_folder_path, source_filename, temp_path)
+                if not ok:
+                    return False, f"MTP copy back failed:\n{out}"
+                if os.path.exists(dest_path):
+                    os.remove(dest_path)
+                shutil.copy2(temp_path, dest_path)
+            except OSError as e:
+                return False, f"File operation failed:\n{e}"
+            finally:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+            return True, (
+                f"Copied mission '{source_filename}'\n"
+                f"  → target file: {target_filename}\n"
+                f"  → location   : {dest_path}"
+            )
+
+        if self._is_adb_path(root):
+            fd, temp_path = tempfile.mkstemp(prefix="djirc2kmzsync-copyback-", suffix=".kmz")
+            os.close(fd)
+            remote_file = self._adb_remote_join(mission.full_folder_path, source_filename)
+            try:
+                ok, out = self._run_adb(["pull", remote_file, temp_path])
+                if not ok:
+                    return False, f"ADB copy back failed:\n{out}"
+                if os.path.exists(dest_path):
+                    os.remove(dest_path)
+                shutil.copy2(temp_path, dest_path)
+            except OSError as e:
+                return False, f"File operation failed:\n{e}"
+            finally:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+            return True, (
+                f"Copied mission '{source_filename}'\n"
+                f"  → target file: {target_filename}\n"
+                f"  → location   : {dest_path}"
+            )
+
+        source_path = os.path.join(mission.full_folder_path, source_filename)
+        if not os.path.isfile(source_path):
+            return False, f"Mission source file not found:\n{source_path}"
+
+        try:
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
+            shutil.copy2(source_path, dest_path)
+        except OSError as e:
+            return False, f"File operation failed:\n{e}"
+
+        return True, (
+            f"Copied mission '{source_filename}'\n"
+            f"  → target file: {target_filename}\n"
+            f"  → location   : {dest_path}"
         )
 
     def _prepare_new_mission_target(self) -> Tuple[bool, RC2Mission | str]:
@@ -1219,7 +1498,7 @@ if ($devices) {
 
         return True, (
             f"Copied '{kmz_file.filename}'\n"
-            f"  → slot     : {mission.guid}\n"
+            f"  → mission  : {mission.guid}\n"
             f"  → saved as : {dest_filename}"
         )
 
@@ -1242,7 +1521,7 @@ if ($devices) {
 
         return True, (
             f"Copied '{kmz_file.filename}'\n"
-            f"  → slot     : {mission.guid}\n"
+            f"  → mission  : {mission.guid}\n"
             f"  → saved as : {dest_filename}"
         )
 
@@ -1352,7 +1631,7 @@ if ($devices) {
             ok, out = self._run_adb(["shell", "ls", "-1p", folder_path])
             if not ok:
                 return False, out
-            output: List[Tuple[str, bool]] = []
+            output = []
             for line in out.splitlines():
                 raw = line.strip()
                 if not raw:
@@ -1547,15 +1826,15 @@ if ($devices) {
 
     def inspect_mission_storage(self, mission: RC2Mission) -> Tuple[bool, str]:
         lines: List[str] = []
-        lines.append(f"Inspecting slot: {mission.guid}")
-        lines.append(f"Slot path: {mission.full_folder_path}")
+        lines.append(f"Inspecting mission: {mission.guid}")
+        lines.append(f"Mission path: {mission.full_folder_path}")
 
         ok_list, listing = self._list_slot_files(mission)
         if not ok_list:
             return False, f"Failed to list slot files: {listing}"
 
         slot_files = listing if isinstance(listing, list) else []
-        lines.append(f"Slot files ({len(slot_files)}): {', '.join(slot_files) if slot_files else '[none]'}")
+        lines.append(f"Mission files ({len(slot_files)}): {', '.join(slot_files) if slot_files else '[none]'}")
 
         kmz_name = mission.kmz_name
         if not kmz_name:
@@ -1565,7 +1844,7 @@ if ($devices) {
                     break
 
         if not kmz_name:
-            lines.append("No KMZ file found in selected slot.")
+            lines.append("No KMZ file found in selected mission.")
             lines.append("RC-2 display name is likely managed outside this slot by DJI app metadata.")
             return True, "\n".join(lines)
 
@@ -1623,7 +1902,7 @@ if ($devices) {
     def confirm_copy_message(self, mission: RC2Mission, kmz_file: KMZFile) -> str:
         dest_filename = mission.kmz_name if mission.kmz_name else f"{mission.guid}.kmz"
         return (
-            f"Overwrite slot:\n"
+            f"Overwrite mission:\n"
             f"  {mission.guid}\n\n"
             f"With source file:\n"
             f"  {kmz_file.filename}\n\n"
