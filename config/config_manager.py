@@ -5,8 +5,12 @@ CONFIG_FILE = "kmz_sync_config.json"
 
 _DEFAULTS = {
     "rc2_folder": "",
-    "pc_folder": ""
+    "pc_folder": "",
+    "rc2_refresh_retry_interval_seconds": 30,
 }
+
+_MIN_RETRY_SECONDS = 1
+_MAX_RETRY_SECONDS = 300
 
 
 class ConfigManager:
@@ -32,6 +36,38 @@ class ConfigManager:
     @pc_folder.setter
     def pc_folder(self, value: str) -> None:
         self._config["pc_folder"] = value
+
+    @property
+    def rc2_refresh_retry_interval_seconds(self) -> int:
+        raw_value = self._config.get(
+            "rc2_refresh_retry_interval_seconds",
+            _DEFAULTS["rc2_refresh_retry_interval_seconds"],
+        )
+
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            return _DEFAULTS["rc2_refresh_retry_interval_seconds"]
+
+        if parsed < _MIN_RETRY_SECONDS:
+            return _MIN_RETRY_SECONDS
+        if parsed > _MAX_RETRY_SECONDS:
+            return _MAX_RETRY_SECONDS
+        return parsed
+
+    @rc2_refresh_retry_interval_seconds.setter
+    def rc2_refresh_retry_interval_seconds(self, value: int) -> None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = _DEFAULTS["rc2_refresh_retry_interval_seconds"]
+
+        if parsed < _MIN_RETRY_SECONDS:
+            parsed = _MIN_RETRY_SECONDS
+        if parsed > _MAX_RETRY_SECONDS:
+            parsed = _MAX_RETRY_SECONDS
+
+        self._config["rc2_refresh_retry_interval_seconds"] = parsed
 
     def save(self) -> None:
         try:

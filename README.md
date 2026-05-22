@@ -66,7 +66,8 @@ Example:
 ```json
 {
     "rc2_folder": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint",
-    "pc_folder": "C:\\D_Drive\\Drone\\RC2Missions"
+  "pc_folder": "C:\\D_Drive\\Drone\\RC2Missions",
+  "rc2_refresh_retry_interval_seconds": 30
 }
 ```
 

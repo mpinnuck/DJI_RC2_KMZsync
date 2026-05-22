@@ -32,7 +32,8 @@ class SyncViewModel:
     DEFAULT_MTP_RC2_ROOT = (
         "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint"
     )
-    POWERSHELL_TIMEOUT_SECONDS = 5
+    POWERSHELL_TIMEOUT_SECONDS = 30
+    MTP_LIST_TIMEOUT_SECONDS = 120
     MTP_COPY_TIMEOUT_SECONDS = 30
     _RC2_NON_MISSION_FOLDERS = {"capability", "map_preview"}
     COPY_MAP_FILE = "kmz_copy_map.json"
@@ -444,7 +445,81 @@ if ($items) {
         )
         return self._run_powershell_json(
             script,
-            timeout_seconds=self.POWERSHELL_TIMEOUT_SECONDS,
+            timeout_seconds=self.MTP_LIST_TIMEOUT_SECONDS,
+        )
+
+    def _list_mtp_missions_bulk(self, mtp_path: str) -> Tuple[bool, List[dict[str, Any]] | str]:
+        script = self._mtp_script(
+            mtp_path,
+            """
+$result = @()
+
+$slotFolders = @(
+    $current.Items() |
+        Where-Object {
+            $_.IsFolder -and
+            $_.Name -ne 'capability' -and
+            $_.Name -ne 'map_preview'
+        } |
+        Sort-Object Name
+)
+
+foreach ($slot in $slotFolders) {
+    $slotFolder = $slot.GetFolder
+    if (-not $slotFolder) {
+        continue
+    }
+
+    $modifiedIndex = $null
+    for ($i = 0; $i -lt 320; $i++) {
+        $label = $slotFolder.GetDetailsOf($null, $i)
+        if (-not $label) {
+            continue
+        }
+        $normalized = ($label -as [string]).Trim().ToLowerInvariant()
+        if ($normalized -in @('date modified', 'modified', 'modification date', 'date de modification')) {
+            $modifiedIndex = $i
+            break
+        }
+    }
+
+    $kmzItems = @(
+        $slotFolder.Items() |
+            Where-Object {
+                (-not $_.IsFolder) -and
+                ($_.Name -match '(?i)\\.kmz$')
+            } |
+            Sort-Object Name
+    )
+
+    $kmzName = ''
+    $modifyDate = ''
+    $modifyDateDetail = ''
+    if ($kmzItems.Count -gt 0) {
+        $first = $kmzItems[0]
+        $kmzName = [string]$first.Name
+        $modifyDate = [string]$first.ModifyDate
+        if ($modifiedIndex -ne $null) {
+            $modifyDateDetail = [string]$slotFolder.GetDetailsOf($first, $modifiedIndex)
+        }
+    }
+
+    $result += [PSCustomObject]@{
+        Name = [string]$slot.Name
+        KMZName = $kmzName
+        ModifyDate = $modifyDate
+        ModifyDateDetail = $modifyDateDetail
+    }
+}
+
+if ($result) {
+    $result | ConvertTo-Json -Compress
+}
+""",
+        )
+        return self._run_powershell_json(
+            script,
+            timeout_seconds=self.MTP_LIST_TIMEOUT_SECONDS,
         )
 
     def _copy_file_to_mtp_folder(self, mtp_folder: str, local_source_path: str) -> Tuple[bool, str]:
@@ -457,6 +532,25 @@ if (-not (Test-Path -LiteralPath $sourcePath)) {{
 }}
 
 $sourceName = [System.IO.Path]::GetFileName($sourcePath)
+$existing = $current.Items() | Where-Object {{ $_.Name -eq $sourceName }} | Select-Object -First 1
+if ($existing) {{
+    $existing.InvokeVerb('delete')
+
+    $deleteDeadline = (Get-Date).AddSeconds(10)
+    do {{
+        $remaining = $current.Items() | Where-Object {{ $_.Name -eq $sourceName }} | Select-Object -First 1
+        if (-not $remaining) {{
+            break
+        }}
+        [System.Threading.Thread]::Sleep(200)
+    }} while ((Get-Date) -lt $deleteDeadline)
+
+    $remaining = $current.Items() | Where-Object {{ $_.Name -eq $sourceName }} | Select-Object -First 1
+    if ($remaining) {{
+        throw "MTP overwrite failed to remove existing file: $sourceName"
+    }}
+}}
+
 $current.CopyHere($sourcePath, 0x614)
 
 $copyDeadline = (Get-Date).AddSeconds(15)
@@ -1028,6 +1122,9 @@ if ($devices) {
     def pc_folder(self) -> str:
         return self._config.pc_folder
 
+    def get_rc2_refresh_retry_interval_seconds(self) -> int:
+        return self._config.rc2_refresh_retry_interval_seconds
+
     # ------------------------------------------------------------------
     # Folder update & persistence
     # ------------------------------------------------------------------
@@ -1092,9 +1189,41 @@ if ($devices) {
     def _load_rc2_missions_mtp(self, mtp_path: str) -> List[RC2Mission]:
         missions: List[RC2Mission] = []
 
+        # Prefer a single MTP query that enumerates all slots and KMZ metadata
+        # in one PowerShell process to reduce startup latency.
+        list_mtp_items_bound_self = getattr(self._list_mtp_items, "__self__", None)
+        list_mtp_items_func = getattr(self._list_mtp_items, "__func__", None)
+        use_bulk_query = list_mtp_items_bound_self is self and list_mtp_items_func is SyncViewModel._list_mtp_items
+
+        ok_bulk = False
+        bulk_result: List[dict[str, Any]] | str = []
+        if use_bulk_query:
+            ok_bulk, bulk_result = self._list_mtp_missions_bulk(mtp_path)
+            if ok_bulk:
+                rows = bulk_result if isinstance(bulk_result, list) else []
+                for row in rows:
+                    slot_name = str(row.get("Name") or "").strip()
+                    if not slot_name:
+                        continue
+
+                    kmz_name = str(row.get("KMZName") or "").strip()
+                    last_modified = self._normalize_mtp_modify_date(
+                        str(row.get("ModifyDateDetail") or "")
+                        or str(row.get("ModifyDate") or "")
+                    )
+                    missions.append(RC2Mission(
+                        guid=slot_name,
+                        kmz_name=kmz_name,
+                        full_folder_path=self._mtp_join(mtp_path, slot_name),
+                        last_modified=last_modified,
+                    ))
+                return missions
+
         ok, result = self._list_mtp_items(mtp_path)
         if not ok:
-            msg = f"[SyncViewModel] Error scanning RC-2 MTP folder: {result}"
+            bulk_error = bulk_result if isinstance(bulk_result, str) and bulk_result.strip() else ""
+            suffix = f" | Bulk query failed: {bulk_error}" if bulk_error else ""
+            msg = f"[SyncViewModel] Error scanning RC-2 MTP folder: {result}{suffix}"
             self._set_last_error(msg)
             return missions
 
@@ -1402,6 +1531,12 @@ Write-Output $folderName
                 except OSError:
                     pass
 
+            self._record_copy_mapping(
+                KMZFile(filename=target_filename, full_path=dest_path),
+                mission,
+                source_filename,
+            )
+
             return True, (
                 f"Copied mission '{source_filename}'\n"
                 f"  → target file: {target_filename}\n"
@@ -1427,6 +1562,12 @@ Write-Output $folderName
                 except OSError:
                     pass
 
+            self._record_copy_mapping(
+                KMZFile(filename=target_filename, full_path=dest_path),
+                mission,
+                source_filename,
+            )
+
             return True, (
                 f"Copied mission '{source_filename}'\n"
                 f"  → target file: {target_filename}\n"
@@ -1443,6 +1584,12 @@ Write-Output $folderName
             shutil.copy2(source_path, dest_path)
         except OSError as e:
             return False, f"File operation failed:\n{e}"
+
+        self._record_copy_mapping(
+            KMZFile(filename=target_filename, full_path=dest_path),
+            mission,
+            source_filename,
+        )
 
         return True, (
             f"Copied mission '{source_filename}'\n"
@@ -1620,7 +1767,7 @@ Write-Output $folderName
         parent_segments = segments[:-levels]
         return "mtp:" + "|".join(parent_segments)
 
-    def _list_folder_items_with_type(self, folder_path: str) -> Tuple[bool, List[Tuple[str, bool]] | str]:
+    def _list_folder_items_with_type(self, folder_path: str) -> Tuple[bool, List[Tuple[str, bool, str]] | str]:
         root = (self._config.rc2_folder or "").strip()
 
         if self._is_mtp_path(root):
@@ -1628,12 +1775,16 @@ Write-Output $folderName
             if not ok:
                 return False, str(result)
             items = result if isinstance(result, list) else []
-            output: List[Tuple[str, bool]] = []
+            output: List[Tuple[str, bool, str]] = []
             for item in items:
                 name = str(item.get("Name") or "").strip()
                 if not name:
                     continue
-                output.append((name, bool(item.get("IsFolder"))))
+                modified = self._normalize_mtp_modify_date(
+                    str(item.get("ModifyDateDetail") or "")
+                    or str(item.get("ModifyDate") or "")
+                )
+                output.append((name, bool(item.get("IsFolder")), modified))
             return True, output
 
         if self._is_adb_path(root):
@@ -1647,14 +1798,22 @@ Write-Output $folderName
                     continue
                 is_folder = raw.endswith("/")
                 name = raw[:-1] if is_folder else raw
-                output.append((name, is_folder))
+                output.append((name, is_folder, ""))
             return True, output
 
         if not os.path.isdir(folder_path):
             return False, f"Folder not found: {folder_path}"
 
         try:
-            output = [(entry.name, entry.is_dir()) for entry in os.scandir(folder_path)]
+            output = []
+            for entry in os.scandir(folder_path):
+                modified = ""
+                if not entry.is_dir():
+                    try:
+                        modified = self._format_display_datetime(datetime.fromtimestamp(entry.stat().st_mtime))
+                    except OSError:
+                        modified = ""
+                output.append((entry.name, entry.is_dir(), modified))
         except OSError as e:
             return False, str(e)
         return True, output
@@ -1717,7 +1876,7 @@ Write-Output $folderName
                 candidates.append(parent_files)
                 ok, items = self._list_folder_items_with_type(parent_files)
                 if ok and isinstance(items, list):
-                    for name, is_folder in items:
+                    for name, is_folder, _ in items:
                         lowered = name.lower()
                         if is_folder and any(token in lowered for token in ("history", "record", "mission", "meta", "index", "cache")):
                             candidates.append(self._mtp_join(parent_files, name))
@@ -1763,17 +1922,21 @@ Write-Output $folderName
             if not ok:
                 continue
             items = listed if isinstance(listed, list) else []
-            files = [(name, is_folder) for name, is_folder in items if not is_folder]
+            files = [(name, modified) for name, is_folder, modified in items if not is_folder]
             interesting = [
-                name for name, _ in files
+                (name, modified) for name, modified in files
                 if name.lower().endswith(meta_exts)
                 or any(token in name.lower() for token in ("history", "mission", "meta", "index", "title", "record"))
             ]
 
             if interesting:
-                lines.append(f"- {folder}: {', '.join(interesting[:8])}{' ...' if len(interesting) > 8 else ''}")
+                preview = [
+                    f"{name} [{modified or 'Unknown'}]"
+                    for name, modified in interesting[:8]
+                ]
+                lines.append(f"- {folder}: {', '.join(preview)}{' ...' if len(interesting) > 8 else ''}")
 
-            for filename in interesting[:10]:
+            for filename, modified in interesting[:10]:
                 checked_files += 1
                 ok_bytes, payload = self._read_file_bytes_from_folder(folder, filename)
                 if not ok_bytes or not isinstance(payload, bytes):
@@ -1796,7 +1959,7 @@ Write-Output $folderName
 
                 lowered = text.lower()
                 if any(target in lowered for target in targets if target):
-                    hits.append(f"{folder} | {filename}")
+                    hits.append(f"{folder} | {filename} [{modified or 'Unknown'}]")
 
         lines.append(f"Metadata files checked: {checked_files}")
         if hits:
@@ -1813,6 +1976,82 @@ Write-Output $folderName
         else:
             lines.append("No GUID/KMZ references found in inspected text metadata files.")
             lines.append("Likely source is a binary DJI app database/index not directly readable via this path.")
+
+        return lines
+
+    def _inspect_binary_metadata_candidates(self, mission: RC2Mission, kmz_name: str) -> List[str]:
+        lines: List[str] = []
+        root = (self._config.rc2_folder or "").strip()
+        candidates: List[str] = []
+
+        def add_candidate(path: str | None) -> None:
+            cleaned = (path or "").strip()
+            if cleaned:
+                candidates.append(cleaned)
+
+        if self._is_mtp_path(root):
+            add_candidate(root)
+            add_candidate(self._mtp_parent_path(root, levels=1))
+            add_candidate(self._mtp_parent_path(root, levels=2))
+        elif self._is_adb_path(root):
+            remote_root = self._adb_remote_root(root)
+            add_candidate(remote_root)
+            if "/" in remote_root:
+                parent_files = remote_root.rsplit("/", 1)[0]
+                add_candidate(parent_files)
+                if "/" in parent_files:
+                    add_candidate(parent_files.rsplit("/", 1)[0])
+        else:
+            add_candidate(root)
+            if os.path.isdir(root):
+                add_candidate(os.path.dirname(root))
+
+        seen: set[str] = set()
+        unique_candidates: List[str] = []
+        for path in candidates:
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            unique_candidates.append(path)
+
+        lines.append("Binary metadata/index search:")
+        lines.append(f"Candidate folders: {len(unique_candidates)}")
+
+        meta_exts = (".db", ".sqlite", ".sqlite3", ".db3", ".dat", ".idx", ".bin")
+        name_tokens = ("database", "index", "metadata", "mission", "history", "record", "cache", "dji")
+        hits: List[str] = []
+
+        for folder in unique_candidates[:8]:
+            ok, listed = self._list_folder_items_with_type(folder)
+            if not ok:
+                continue
+
+            items = listed if isinstance(listed, list) else []
+            matches = [
+                (name, modified) for name, is_folder, modified in items
+                if not is_folder and (
+                    name.lower().endswith(meta_exts)
+                    or any(token in name.lower() for token in name_tokens)
+                )
+            ]
+
+            if matches:
+                preview = [
+                    f"{name} [{modified or 'Unknown'}]"
+                    for name, modified in matches[:8]
+                ]
+                lines.append(f"- {folder}: {', '.join(preview)}{' ...' if len(matches) > 8 else ''}")
+
+            for name, modified in matches[:10]:
+                hits.append(f"{folder} | {name} [{modified or 'Unknown'}]")
+
+        if hits:
+            lines.append(f"Best candidate: {hits[0]}")
+            lines.append("Potential binary metadata/index files:")
+            for hit in hits[:12]:
+                lines.append(f"  * {hit}")
+        else:
+            lines.append("No obvious binary database/index filenames found in candidate folders.")
 
         return lines
 
@@ -1833,7 +2072,7 @@ Write-Output $folderName
                     return found
         return found
 
-    def inspect_mission_storage(self, mission: RC2Mission) -> Tuple[bool, str]:
+    def inspect_mission_storage(self, mission: RC2Mission, deep: bool = False) -> Tuple[bool, str]:
         lines: List[str] = []
         lines.append(f"Inspecting mission: {mission.guid}")
         lines.append(f"Mission path: {mission.full_folder_path}")
@@ -1899,7 +2138,19 @@ Write-Output $folderName
                     lines.append("No obvious name/title fields found inside KMZ XML files.")
                     lines.append("RC-2 edited mission display names are likely stored in DJI app index/database metadata.")
 
+                if not deep:
+                    lines.append(
+                        "Quick inspect summary: display-name metadata is likely external to the KMZ. "
+                        "Use Deep Inspect to search DJI metadata/index files."
+                    )
+                    return True, "\n".join(lines)
+
                 lines.extend(self._inspect_metadata_history_candidates(mission, kmz_name))
+                lines.extend(self._inspect_binary_metadata_candidates(mission, kmz_name))
+                lines.append(
+                    "Deep inspect summary: if the edited display name is still missing, it is likely "
+                    "stored in a DJI binary database/index file outside the slot and outside the KMZ."
+                )
         except zipfile.BadZipFile:
             return False, "Selected mission KMZ is not a valid zip archive."
 

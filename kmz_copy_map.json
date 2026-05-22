@@ -1,5 +1,5 @@
 {
-    "updated_at": "2026-05-21 17:33:21",
+    "updated_at": "2026-05-22 12:06:01",
     "note": "This map tracks file-level copy operations only. If RC-2 is opened with 'adjust/open as new', DJI app metadata may create a new mission record that diverges from this mapping.",
     "by_source": {
         "Home\\hornsby-sewage-work.kmz": {
@@ -57,15 +57,82 @@
                     "target_kmz_filename": "6F017A12-ADD9-40C3-BCAC-8E25B1A7625F.kmz",
                     "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|6F017A12-ADD9-40C3-BCAC-8E25B1A7625F",
                     "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-22 10:38:04",
+                    "source_filename": "Home\\hornsby-sewage-work.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\hornsby-sewage-work.kmz",
+                    "target_mission_guid": "28C525B8-05FA-4469-8835-5CF2A2A7B4C0",
+                    "target_kmz_filename": "28C525B8-05FA-4469-8835-5CF2A2A7B4C0.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|28C525B8-05FA-4469-8835-5CF2A2A7B4C0",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-22 10:48:13",
+                    "source_filename": "Home\\hornsby-sewage-work.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\hornsby-sewage-work.kmz",
+                    "target_mission_guid": "5390DDF5-ED11-4DBC-9D19-96A6F708AEF9",
+                    "target_kmz_filename": "5390DDF5-ED11-4DBC-9D19-96A6F708AEF9.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|5390DDF5-ED11-4DBC-9D19-96A6F708AEF9",
+                    "connection_mode": "MTP"
                 }
             ],
             "last": {
-                "copied_at": "2026-05-21 17:33:21",
+                "copied_at": "2026-05-22 10:48:13",
                 "source_filename": "Home\\hornsby-sewage-work.kmz",
                 "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\hornsby-sewage-work.kmz",
-                "target_mission_guid": "6F017A12-ADD9-40C3-BCAC-8E25B1A7625F",
-                "target_kmz_filename": "6F017A12-ADD9-40C3-BCAC-8E25B1A7625F.kmz",
-                "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|6F017A12-ADD9-40C3-BCAC-8E25B1A7625F",
+                "target_mission_guid": "5390DDF5-ED11-4DBC-9D19-96A6F708AEF9",
+                "target_kmz_filename": "5390DDF5-ED11-4DBC-9D19-96A6F708AEF9.kmz",
+                "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|5390DDF5-ED11-4DBC-9D19-96A6F708AEF9",
+                "connection_mode": "MTP"
+            }
+        },
+        "Home\\hornsby-quarry.kmz": {
+            "history": [
+                {
+                    "copied_at": "2026-05-22 11:18:47",
+                    "source_filename": "Home\\hornsby-quarry.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\hornsby-quarry.kmz",
+                    "target_mission_guid": "4ABB591C-13A1-4500-9DE6-4852BD6B6380",
+                    "target_kmz_filename": "4ABB591C-13A1-4500-9DE6-4852BD6B6380.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|4ABB591C-13A1-4500-9DE6-4852BD6B6380",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-22 11:29:54",
+                    "source_filename": "Home\\hornsby-quarry.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\hornsby-quarry.kmz",
+                    "target_mission_guid": "4ABB591C-13A1-4500-9DE6-4852BD6B6380",
+                    "target_kmz_filename": "4ABB591C-13A1-4500-9DE6-4852BD6B6380.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|4ABB591C-13A1-4500-9DE6-4852BD6B6380",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-22 11:57:59",
+                    "source_filename": "Home\\hornsby-quarry.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\hornsby-quarry.kmz",
+                    "target_mission_guid": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
+                    "target_kmz_filename": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-22 12:06:01",
+                    "source_filename": "Home\\hornsby-quarry.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\hornsby-quarry.kmz",
+                    "target_mission_guid": "4ABB591C-13A1-4500-9DE6-4852BD6B6380",
+                    "target_kmz_filename": "4ABB591C-13A1-4500-9DE6-4852BD6B6380.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|4ABB591C-13A1-4500-9DE6-4852BD6B6380",
+                    "connection_mode": "MTP"
+                }
+            ],
+            "last": {
+                "copied_at": "2026-05-22 12:06:01",
+                "source_filename": "Home\\hornsby-quarry.kmz",
+                "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\hornsby-quarry.kmz",
+                "target_mission_guid": "4ABB591C-13A1-4500-9DE6-4852BD6B6380",
+                "target_kmz_filename": "4ABB591C-13A1-4500-9DE6-4852BD6B6380.kmz",
+                "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|4ABB591C-13A1-4500-9DE6-4852BD6B6380",
                 "connection_mode": "MTP"
             }
         }

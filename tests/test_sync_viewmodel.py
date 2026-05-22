@@ -1,4 +1,5 @@
 import os
+import zipfile
 import subprocess
 import tempfile
 import unittest
@@ -330,6 +331,12 @@ class TestExecuteCopy(unittest.TestCase):
         self.assertTrue(ok)
         with open(target.full_path, "rb") as fh:
             self.assertEqual(fh.read(), b"RC2_EDITED")
+
+        rows, _, _ = self._vm.get_copy_mapping_summary()
+        match = next((row for row in rows if row.get("source_filename") == "dronelink_target.kmz"), None)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.get("target_mission_guid"), "guid-008")
+        self.assertEqual(match.get("target_kmz_filename"), "edited_on_rc2.kmz")
 
     def test_copy_back_uses_first_slot_kmz_when_name_missing(self):
         mission = self._slot("guid-009")
@@ -801,6 +808,52 @@ class TestCopyMapping(unittest.TestCase):
         rows, _, _ = self._vm.get_copy_mapping_summary()
         self.assertEqual(rows[0]["source_filename"], "b.kmz")
         self.assertEqual(rows[1]["source_filename"], "a.kmz")
+
+
+class TestInspectMissionStorage(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def _mission_with_kmz(self) -> RC2Mission:
+        slot_dir = os.path.join(self._tmp, "guid-inspect")
+        os.makedirs(slot_dir)
+        kmz_path = os.path.join(slot_dir, "mission.kmz")
+        with zipfile.ZipFile(kmz_path, "w") as archive:
+            archive.writestr("wpmz/template.kml", "<kml><Document></Document></kml>")
+            archive.writestr("wpmz/waylines.wpml", "<wpml><mission></mission></wpml>")
+        return RC2Mission("guid-inspect", "mission.kmz", slot_dir)
+
+    def test_quick_inspect_skips_deep_probes_and_reports_summary(self):
+        vm = _make_vm(rc2_root=self._tmp)
+        mission = self._mission_with_kmz()
+
+        def _should_not_run(*_args, **_kwargs):
+            raise AssertionError("Deep probe should not run in quick inspect mode")
+
+        vm._inspect_metadata_history_candidates = _should_not_run
+        vm._inspect_binary_metadata_candidates = _should_not_run
+
+        ok, details = vm.inspect_mission_storage(mission, deep=False)
+
+        self.assertTrue(ok)
+        self.assertIn("Quick inspect summary", details)
+        self.assertIn("external to the KMZ", details)
+
+    def test_deep_inspect_reports_binary_candidates(self):
+        vm = _make_vm(rc2_root=self._tmp)
+        mission = self._mission_with_kmz()
+
+        with open(os.path.join(self._tmp, "DJI_MissionIndex.sqlite"), "wb") as fh:
+            fh.write(b"sqlite")
+
+        ok, details = vm.inspect_mission_storage(mission, deep=True)
+
+        self.assertTrue(ok)
+        self.assertIn("Best candidate:", details)
+        self.assertIn("Binary metadata/index search", details)
+        self.assertIn("DJI_MissionIndex.sqlite", details)
+        self.assertIn("Deep inspect summary", details)
 
 
 if __name__ == "__main__":

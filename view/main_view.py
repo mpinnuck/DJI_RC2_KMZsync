@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v1.4"
+_APP_VERSION = "v1.5"
 
 
 try:
@@ -67,6 +67,11 @@ class MainView:
         self._refresh_pc_loaded = False
         self._refresh_rc_loaded = False
         self._refresh_error_seen = False
+        self._rc2_retry_after_id: str | None = None
+        self._rc2_retry_in_progress = False
+        self._rc2_retry_attempt = 0
+        self._rc2_retry_delay_ms = self._vm.get_rc2_refresh_retry_interval_seconds() * 1000
+        self._rc2_scan_lock = threading.Lock()
         self._busy = False
         self._copy_in_progress = False
         self._inspect_in_progress = False
@@ -99,6 +104,11 @@ class MainView:
         x = max((screen_w - width) // 2, 0)
         y = max((screen_h - height) // 2, 0)
         self._root.geometry(f"{width}x{height}+{x}+{y}")
+        self._root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self) -> None:
+        self._cancel_rc2_background_retry(reset_attempts=False)
+        self._root.destroy()
 
     # ------------------------------------------------------------------
     # Styles
@@ -261,8 +271,13 @@ class MainView:
         ).pack(side=tk.RIGHT, padx=(0, 6))
         ttk.Button(
             log_header,
-            text="Inspect Mission",
-            command=self._inspect_selected_mission,
+            text="Deep Inspect",
+            command=lambda: self._inspect_selected_mission(deep=True),
+        ).pack(side=tk.RIGHT, padx=(0, 6))
+        ttk.Button(
+            log_header,
+            text="Quick Inspect",
+            command=lambda: self._inspect_selected_mission(deep=False),
         ).pack(side=tk.RIGHT, padx=(0, 6))
         ttk.Button(log_header, text="Clear Log", command=self._clear_log).pack(side=tk.RIGHT)
 
@@ -750,7 +765,7 @@ class MainView:
         self._set_status("✘  ADB not ready.", colour=_ERROR)
         self._log(message, level="ERROR")
 
-    def _inspect_selected_mission(self) -> None:
+    def _inspect_selected_mission(self, deep: bool = False) -> None:
         if self._inspect_in_progress:
             self._set_status("Mission inspection already in progress...", colour=_TEXT_DIM)
             self._log("Inspect request ignored: inspection already in progress.", level="WARN")
@@ -763,12 +778,13 @@ class MainView:
             return
 
         self._inspect_in_progress = True
-        self._set_busy(True, "Inspecting selected mission...")
-        self._set_status("Inspecting selected mission...", colour=_TEXT_DIM)
-        self._log(f"Inspect mission requested for mission {mission.guid}", level="INFO")
+        mode = "Deep" if deep else "Quick"
+        self._set_busy(True, f"{mode} inspecting selected mission...")
+        self._set_status(f"{mode} inspecting selected mission...", colour=_TEXT_DIM)
+        self._log(f"{mode} inspect mission requested for mission {mission.guid}", level="INFO")
 
         def _worker() -> None:
-            ok, details = self._vm.inspect_mission_storage(mission)
+            ok, details = self._vm.inspect_mission_storage(mission, deep=deep)
             self._inspect_queue.put((ok, details))
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -815,6 +831,8 @@ class MainView:
             self._refresh_pending = True
             return
 
+        self._cancel_rc2_background_retry(reset_attempts=False)
+
         rc2_path = self._rc2_entry.get().strip()
         pc_path  = self._pc_entry.get().strip()
         if rc2_path != self._vm.rc2_folder:
@@ -845,29 +863,7 @@ class MainView:
 
             def _load_rc2() -> None:
                 try:
-                    self._vm.clear_stale_preview_cache()
-                    missions = self._vm.load_rc2_missions()
-                    rc2_error = self._vm.consume_last_error()
-                    preview_data: dict[str, bytes | None] = {}
-                    for mission in missions:
-                        path = self._vm.get_mission_preview_path(mission.guid)
-                        data: bytes | None = None
-                        if path and os.path.isfile(path):
-                            try:
-                                with open(path, "rb") as fh:
-                                    data = fh.read()
-                            except OSError:
-                                data = None
-
-                            lowered = os.path.normpath(path).lower()
-                            if "djirc2kmzsync-previews" in lowered:
-                                try:
-                                    os.remove(path)
-                                except OSError:
-                                    pass
-
-                        preview_data[mission.guid] = data
-
+                    missions, rc2_error, preview_data = self._load_rc2_payload()
                     self._refresh_queue.put(("rc", serial, missions, rc2_error, preview_data))
                 except Exception as exc:
                     self._refresh_queue.put(("error", serial, f"RC-2 refresh failed: {exc}"))
@@ -885,6 +881,83 @@ class MainView:
         threading.Thread(target=_worker, daemon=True).start()
         self._root.after(50, self._drain_refresh_queue)
 
+    def _load_rc2_payload(self) -> tuple[list[RC2Mission], str | None, dict[str, bytes | None]]:
+        with self._rc2_scan_lock:
+            self._vm.clear_stale_preview_cache()
+            missions = self._vm.load_rc2_missions()
+            rc2_error = self._vm.consume_last_error()
+            preview_data: dict[str, bytes | None] = {}
+
+            for mission in missions:
+                path = self._vm.get_mission_preview_path(mission.guid)
+                data: bytes | None = None
+                if path and os.path.isfile(path):
+                    try:
+                        with open(path, "rb") as fh:
+                            data = fh.read()
+                    except OSError:
+                        data = None
+
+                    lowered = os.path.normpath(path).lower()
+                    if "djirc2kmzsync-previews" in lowered:
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+
+                preview_data[mission.guid] = data
+
+            return missions, rc2_error, preview_data
+
+    def _schedule_rc2_background_retry(self, reason: str) -> None:
+        if self._rc2_retry_after_id is not None:
+            return
+
+        self._rc2_retry_delay_ms = self._vm.get_rc2_refresh_retry_interval_seconds() * 1000
+
+        self._log(
+            f"RC-2 list refresh restart queued in {int(self._rc2_retry_delay_ms / 1000)}s ({reason}).",
+            level="INFO",
+        )
+        self._rc2_retry_after_id = self._root.after(self._rc2_retry_delay_ms, self._start_rc2_background_retry)
+
+    def _cancel_rc2_background_retry(self, reset_attempts: bool) -> None:
+        if self._rc2_retry_after_id is not None:
+            try:
+                self._root.after_cancel(self._rc2_retry_after_id)
+            except tk.TclError:
+                pass
+            self._rc2_retry_after_id = None
+
+        if reset_attempts:
+            self._rc2_retry_attempt = 0
+
+    def _start_rc2_background_retry(self) -> None:
+        self._rc2_retry_after_id = None
+        if self._refresh_active or self._busy or self._copy_in_progress or self._delete_in_progress or self._inspect_in_progress:
+            self._schedule_rc2_background_retry("UI busy")
+            return
+
+        if self._rc2_retry_in_progress:
+            return
+
+        self._rc2_retry_in_progress = True
+        self._rc2_retry_attempt += 1
+        attempt = self._rc2_retry_attempt
+        self._log(f"RC-2 list refresh restart #{attempt} started in background.", level="INFO")
+
+        def _worker() -> None:
+            started = time.monotonic()
+            try:
+                missions, rc2_error, preview_data = self._load_rc2_payload()
+            except Exception as exc:
+                missions, rc2_error, preview_data = [], f"RC-2 background refresh failed: {exc}", {}
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._refresh_queue.put(("rc_retry", attempt, missions, rc2_error, preview_data, elapsed_ms))
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._root.after(50, self._drain_refresh_queue)
+
     def _drain_refresh_queue(self) -> None:
         had_items = False
         while True:
@@ -895,6 +968,21 @@ class MainView:
             had_items = True
 
             kind = payload[0]
+            if kind == "rc_retry":
+                _attempt, missions, rc2_error, preview_data, elapsed_ms = payload[1], payload[2], payload[3], payload[4], payload[5]
+                self._rc2_retry_in_progress = False
+                self._populate_rc2_tree(missions, rc2_error, preview_data)
+                self._log(f"RC-2 background refresh time: {elapsed_ms} ms", level="DEBUG")
+
+                if rc2_error:
+                    self._schedule_rc2_background_retry("previous attempt failed")
+                else:
+                    self._cancel_rc2_background_retry(reset_attempts=True)
+                    self._refresh_mapping()
+                    self._update_connection_mode()
+                    self._log("RC-2 list background refresh successful.", level="INFO")
+                continue
+
             serial = payload[1]
             if serial != self._refresh_serial:
                 continue
@@ -911,6 +999,10 @@ class MainView:
                 missions, rc2_error, preview_data = payload[2], payload[3], payload[4]
                 self._populate_rc2_tree(missions, rc2_error, preview_data)
                 self._refresh_rc_loaded = True
+                if rc2_error:
+                    self._schedule_rc2_background_retry("initial/manual refresh failed")
+                else:
+                    self._cancel_rc2_background_retry(reset_attempts=True)
                 if not self._refresh_pc_loaded:
                     self._set_status("RC-2 missions loaded. Loading PC files...")
                 continue
@@ -939,11 +1031,11 @@ class MainView:
                     self._refresh_pending = False
                     self._root.after(10, self._refresh)
 
-        if self._refresh_active and not had_items:
+        if (self._refresh_active or self._rc2_retry_in_progress) and not had_items:
             self._root.after(50, self._drain_refresh_queue)
             return
 
-        if self._refresh_active:
+        if self._refresh_active or self._rc2_retry_in_progress:
             self._root.after(50, self._drain_refresh_queue)
 
     def _populate_rc2_tree(
@@ -974,21 +1066,55 @@ class MainView:
         self._mission_preview_images = {}
         filter_text = self._rc2_filter_var.get().strip().lower()
 
-        for m in self._last_rc2_missions:
+        sorted_missions = sorted(
+            self._last_rc2_missions,
+            key=self._mission_sort_key,
+            reverse=True,
+        )
+
+        for m in sorted_missions:
+            source_kmz = self._mapped_source_kmz_for_guid(m.guid)
             if filter_text:
-                haystack = f"{m.guid} {m.display_kmz_name} {m.display_last_modified}".lower()
+                haystack = f"{m.guid} {m.display_kmz_name} {m.display_last_modified} {source_kmz}".lower()
                 if filter_text not in haystack:
                     continue
 
             self._missions_by_guid[m.guid] = m
             tag = "empty" if m.is_empty else ""
             preview_image = self._preview_image_for_mission(m.guid, self._last_preview_data.get(m.guid))
-            slot_display = f"{m.display_kmz_name}\n{m.guid}\n{m.display_last_modified}"
+            timestamp_display = m.display_last_modified
+            if source_kmz:
+                timestamp_display = f"{timestamp_display}   |   {source_kmz}"
+            slot_display = f"{m.display_kmz_name}\n{m.guid}\n{timestamp_display}"
             self._rc2_tree.insert("", tk.END,
                                   iid=m.guid,
                                   image=preview_image,
                                   values=(slot_display,),
                                   tags=(tag,))
+
+    def _mapped_source_kmz_for_guid(self, guid: str) -> str:
+        target = (guid or "").strip().lower()
+        if not target:
+            return ""
+
+        for row in self._mapping_rows:
+            mapped_guid = str(row.get("target_mission_guid") or "").strip().lower()
+            if mapped_guid == target:
+                return str(row.get("source_filename") or "").strip()
+        return ""
+
+    @staticmethod
+    def _mission_sort_key(mission: RC2Mission) -> tuple[int, datetime]:
+        raw = (mission.last_modified or "").strip()
+        if not raw:
+            return (0, datetime.min)
+
+        try:
+            parsed = datetime.strptime(raw, "%d/%m/%Y %H:%M:%S")
+        except ValueError:
+            return (0, datetime.min)
+
+        return (1, parsed)
 
     def _populate_pc_tree(self, files: list[KMZFile], last_error: str | None) -> None:
         for row in self._pc_tree.get_children():
@@ -1050,6 +1176,9 @@ class MainView:
                     row.get("copied_at", ""),
                 ),
             )
+
+        if self._last_rc2_missions:
+            self._render_rc2_tree()
 
     # ------------------------------------------------------------------
     # Selection helpers — return model objects
