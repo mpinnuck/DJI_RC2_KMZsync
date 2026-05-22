@@ -1,5 +1,5 @@
 {
-    "updated_at": "2026-05-22 12:06:01",
+    "updated_at": "2026-05-22 12:24:47",
     "note": "This map tracks file-level copy operations only. If RC-2 is opened with 'adjust/open as new', DJI app metadata may create a new mission record that diverges from this mapping.",
     "by_source": {
         "Home\\hornsby-sewage-work.kmz": {
@@ -133,6 +133,28 @@
                 "target_mission_guid": "4ABB591C-13A1-4500-9DE6-4852BD6B6380",
                 "target_kmz_filename": "4ABB591C-13A1-4500-9DE6-4852BD6B6380.kmz",
                 "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|4ABB591C-13A1-4500-9DE6-4852BD6B6380",
+                "connection_mode": "MTP"
+            }
+        },
+        "Home\\normanhurst-oval.kmz": {
+            "history": [
+                {
+                    "copied_at": "2026-05-22 12:24:47",
+                    "source_filename": "Home\\normanhurst-oval.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\normanhurst-oval.kmz",
+                    "target_mission_guid": "7DF78A11-B512-4D24-A103-1E73EB873828",
+                    "target_kmz_filename": "7DF78A11-B512-4D24-A103-1E73EB873828.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|7DF78A11-B512-4D24-A103-1E73EB873828",
+                    "connection_mode": "MTP"
+                }
+            ],
+            "last": {
+                "copied_at": "2026-05-22 12:24:47",
+                "source_filename": "Home\\normanhurst-oval.kmz",
+                "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\normanhurst-oval.kmz",
+                "target_mission_guid": "7DF78A11-B512-4D24-A103-1E73EB873828",
+                "target_kmz_filename": "7DF78A11-B512-4D24-A103-1E73EB873828.kmz",
+                "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|7DF78A11-B512-4D24-A103-1E73EB873828",
                 "connection_mode": "MTP"
             }
         }

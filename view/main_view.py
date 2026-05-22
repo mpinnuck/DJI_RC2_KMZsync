@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v1.5"
+_APP_VERSION = "v1.6"
 
 
 try:
@@ -108,7 +108,17 @@ class MainView:
 
     def _on_close(self) -> None:
         self._cancel_rc2_background_retry(reset_attempts=False)
+        self._flush_path_entries()
         self._root.destroy()
+
+    def _flush_path_entries(self) -> None:
+        """Persist any unsaved path-entry edits (e.g. paste without pressing Enter)."""
+        rc2_path = self._rc2_entry.get().strip()
+        pc_path  = self._pc_entry.get().strip()
+        if rc2_path != self._vm.rc2_folder:
+            self._vm.set_rc2_folder(rc2_path)
+        if pc_path != self._vm.pc_folder:
+            self._vm.set_pc_folder(pc_path)
 
     # ------------------------------------------------------------------
     # Styles
@@ -369,6 +379,11 @@ class MainView:
         self._bind_tree_clear_on_blank(self._mapping_tree)
 
         self._log("Application started.")
+        if Image is None or ImageTk is None:
+            self._log(
+                "Preview decoder unavailable (Pillow not bundled). Mission thumbnails will show placeholders.",
+                level="WARN",
+            )
         self._refresh_mapping()
 
     def _bind_tree_clear_on_blank(self, tree: ttk.Treeview) -> None:
@@ -832,13 +847,7 @@ class MainView:
             return
 
         self._cancel_rc2_background_retry(reset_attempts=False)
-
-        rc2_path = self._rc2_entry.get().strip()
-        pc_path  = self._pc_entry.get().strip()
-        if rc2_path != self._vm.rc2_folder:
-            self._vm.set_rc2_folder(rc2_path)
-        if pc_path != self._vm.pc_folder:
-            self._vm.set_pc_folder(pc_path)
+        self._flush_path_entries()
 
         self._refresh_serial += 1
         serial = self._refresh_serial

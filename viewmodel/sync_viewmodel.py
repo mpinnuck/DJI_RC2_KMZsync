@@ -17,7 +17,7 @@ try:
 except ImportError:
     Image = None
 
-from config.config_manager import ConfigManager
+from config.config_manager import ConfigManager, get_runtime_base_dir
 from model.kmz_file import KMZFile
 from model.rc2_mission import RC2Mission
 
@@ -45,24 +45,34 @@ class SyncViewModel:
         if copy_map_path:
             self._copy_map_path = copy_map_path
         else:
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            base_dir = get_runtime_base_dir()
             self._copy_map_path = os.path.join(base_dir, self.COPY_MAP_FILE)
+        self._ensure_copy_map_exists()
 
     @staticmethod
     def _now_iso() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    @staticmethod
+    def _default_copy_map_payload() -> dict[str, Any]:
+        return {
+            "updated_at": "",
+            "note": (
+                "This map tracks file-level copy operations only. If RC-2 is opened with "
+                "'adjust/open as new', DJI app metadata may create a new mission record that "
+                "diverges from this mapping."
+            ),
+            "by_source": {},
+        }
+
+    def _ensure_copy_map_exists(self) -> None:
+        if os.path.isfile(self._copy_map_path):
+            return
+        self._save_copy_map(self._default_copy_map_payload())
+
     def _load_copy_map(self) -> dict[str, Any]:
         if not os.path.isfile(self._copy_map_path):
-            return {
-                "updated_at": "",
-                "note": (
-                    "This map tracks file-level copy operations only. If RC-2 is opened with "
-                    "'adjust/open as new', DJI app metadata may create a new mission record that "
-                    "diverges from this mapping."
-                ),
-                "by_source": {},
-            }
+            return self._default_copy_map_payload()
 
         try:
             with open(self._copy_map_path, "r", encoding="utf-8") as fh:
@@ -77,15 +87,7 @@ class SyncViewModel:
         except (OSError, json.JSONDecodeError):
             pass
 
-        return {
-            "updated_at": "",
-            "note": (
-                "This map tracks file-level copy operations only. If RC-2 is opened with "
-                "'adjust/open as new', DJI app metadata may create a new mission record that "
-                "diverges from this mapping."
-            ),
-            "by_source": {},
-        }
+        return self._default_copy_map_payload()
 
     def _save_copy_map(self, payload: dict[str, Any]) -> None:
         try:
@@ -331,6 +333,14 @@ class SyncViewModel:
 
         effective_timeout = timeout_seconds or cls.POWERSHELL_TIMEOUT_SECONDS
 
+        startupinfo = None
+        creationflags = 0
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
         try:
             result = subprocess.run(
                 [powershell, "-NoProfile", "-Command", script],
@@ -338,6 +348,8 @@ class SyncViewModel:
                 text=True,
                 check=False,
                 timeout=effective_timeout,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
             )
         except KeyboardInterrupt:
             return False, "PowerShell command was interrupted."

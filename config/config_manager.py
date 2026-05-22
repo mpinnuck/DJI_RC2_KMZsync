@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 
 CONFIG_FILE = "kmz_sync_config.json"
 
@@ -11,6 +12,16 @@ _DEFAULTS = {
 
 _MIN_RETRY_SECONDS = 1
 _MAX_RETRY_SECONDS = 300
+
+
+def get_runtime_base_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.getcwd()
+
+
+def get_config_file_path() -> str:
+    return os.path.join(get_runtime_base_dir(), CONFIG_FILE)
 
 
 class ConfigManager:
@@ -70,8 +81,9 @@ class ConfigManager:
         self._config["rc2_refresh_retry_interval_seconds"] = parsed
 
     def save(self) -> None:
+        config_path = get_config_file_path()
         try:
-            with open(CONFIG_FILE, "w") as f:
+            with open(config_path, "w") as f:
                 json.dump(self._config, f, indent=4)
         except OSError as e:
             print(f"[ConfigManager] Failed to save config: {e}")
@@ -80,10 +92,14 @@ class ConfigManager:
     # Private
     # ------------------------------------------------------------------
     def _load(self) -> None:
-        if not os.path.exists(CONFIG_FILE):
+        config_path = get_config_file_path()
+
+        if not os.path.exists(config_path):
+            # Initialize a default config file for first-run UX, especially in packaged builds.
+            self.save()
             return
         try:
-            with open(CONFIG_FILE, "r") as f:
+            with open(config_path, "r") as f:
                 loaded = json.load(f)
             self._config.update(loaded)
         except (OSError, json.JSONDecodeError) as e:
