@@ -2,6 +2,8 @@
 
 Desktop utility for syncing Dronelink KMZ missions between PC and DJI RC-2 mission slots.
 
+Note: This app and workflow are intended for DJI drones where DJI has not provided a public SDK integration path, such as the Air 3S.
+
 ## Quick Start (60 seconds)
 
 ```powershell
