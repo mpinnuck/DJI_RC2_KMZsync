@@ -52,6 +52,8 @@ Runtime dependencies:
 Optional tools:
 - ADB in PATH (only required for adb: mode)
 
+The app does not require ADB to run. By default it uses the Windows built-in MTP interface for RC-2 access.
+
 Development/build dependencies:
 - pytest
 - pyinstaller
@@ -63,6 +65,45 @@ Install dependencies in venv:
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe -m pip install pyinstaller
 ```
+
+## ADB Setup (optional)
+
+If you plan to use `adb:` RC-2 paths, install Android Platform Tools on Windows.
+
+Why install ADB if it is optional:
+- MTP/Explorer access can be unreliable on some PCs; ADB is a useful fallback path.
+- `adb devices` and `adb shell` provide better diagnostics when RC-2 connectivity is unclear.
+- ADB enables scriptable, repeatable command-line checks/copy operations.
+
+Install with winget:
+
+```powershell
+winget search platform-tools
+winget install --id Google.PlatformTools --exact
+```
+
+Verify ADB installation:
+
+```powershell
+adb version
+adb devices
+```
+
+On RC-2, enable USB debugging and accept the host authorization prompt.
+
+Verify you can browse RC waypoint storage over ADB:
+
+```powershell
+adb shell ls /sdcard/Android/data/dji.go.v5/files/waypoint
+```
+
+If needed, try the equivalent path:
+
+```powershell
+adb shell ls /storage/emulated/0/Android/data/dji.go.v5/files/waypoint
+```
+
+In the app, you can also use the `ADB Status` button in Activity Log as a quick connectivity check.
 
 ## Run From Source
 
@@ -124,12 +165,22 @@ Important:
 5. In PC list, select the source KMZ.
 6. Click the left COPY button (PC to RC-2).
 7. Verify success in Activity Log and optional Mission Mapping tab.
-8. Fly the mission. If RC signal is lost, DJI may prompt mission adjust/open behavior.
-9. After editing on RC-2, reconnect and refresh.
-10. Select the edited RC-2 mission slot.
-11. Select the target PC KMZ filename to overwrite (or leave none for GUID default).
-12. Click the right COPY button (RC-2 to PC) to pull mission back.
-13. Confirm updated file on PC and review mapping row timestamp.
+8. Open the mission on RC-2.
+9. Select "Adjust and open new mission".
+10. Check mission speed change if required, then use "Set All".
+11. Check altitude of first and last waypoints, and adjust if required.
+12. Set RC Signal Lost behavior.
+13. Exit mission edit and save the mission.
+14. Edit the mission name as required.
+15. Open the original dummy mission and select "Cancel changes".
+16. Exit waypoint mode.
+17. Go back to this app on your PC.
+18. Reconnect RC-2 if needed, then click Sync/Refresh.
+19. Select the edited RC-2 mission slot.
+20. Select the target PC KMZ filename to overwrite (or leave none for GUID default).
+21. Click the right COPY button (RC-2 to PC) to pull mission back.
+22. Confirm updated file on PC and review mapping row timestamp.
+23. Fly the mission. If RC signal is lost, DJI may prompt mission adjust/open behavior.
 
 Copy notes:
 - Upload and copy-back both overwrite existing target filenames when present.
