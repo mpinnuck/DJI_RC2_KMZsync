@@ -20,7 +20,7 @@ class TestConfigManager(unittest.TestCase):
         cfg = ConfigManager()
         self.assertEqual(cfg.rc2_folder, "")
         self.assertEqual(cfg.pc_folder, "")
-        self.assertEqual(cfg.rc2_refresh_retry_interval_seconds, 30)
+        self.assertEqual(cfg.rc2_refresh_retry_interval_seconds, 5)
 
     def test_save_and_reload(self):
         cfg = ConfigManager()
@@ -84,7 +84,7 @@ class TestConfigManager(unittest.TestCase):
         with open(CONFIG_FILE, "w") as f:
             json.dump({"rc2_refresh_retry_interval_seconds": "oops"}, f)
         cfg = ConfigManager()
-        self.assertEqual(cfg.rc2_refresh_retry_interval_seconds, 30)
+        self.assertEqual(cfg.rc2_refresh_retry_interval_seconds, 5)
 
 
 if __name__ == "__main__":

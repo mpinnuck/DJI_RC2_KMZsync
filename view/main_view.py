@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v1.6"
+_APP_VERSION = "v1.7"
 
 
 try:
@@ -71,6 +71,10 @@ class MainView:
         self._rc2_retry_in_progress = False
         self._rc2_retry_attempt = 0
         self._rc2_retry_delay_ms = self._vm.get_rc2_refresh_retry_interval_seconds() * 1000
+        self._rc2_connected = False
+        self._rc2_last_probe_connected: bool | None = None
+        self._rc2_monitor_stop = threading.Event()
+        self._rc2_monitor_thread: threading.Thread | None = None
         self._rc2_scan_lock = threading.Lock()
         self._busy = False
         self._copy_in_progress = False
@@ -83,6 +87,7 @@ class MainView:
         self._apply_styles()
         self._rc2_filter_var = tk.StringVar(value="")
         self._build_ui()
+        self._start_rc2_connection_monitor()
         # Ensure uncaught Tk callback exceptions are surfaced in the UI log.
         self._root.report_callback_exception = self._handle_callback_exception
         self._refresh()
@@ -108,8 +113,45 @@ class MainView:
 
     def _on_close(self) -> None:
         self._cancel_rc2_background_retry(reset_attempts=False)
+        self._rc2_monitor_stop.set()
         self._flush_path_entries()
         self._root.destroy()
+
+    def _start_rc2_connection_monitor(self) -> None:
+        if self._rc2_monitor_thread and self._rc2_monitor_thread.is_alive():
+            return
+
+        def _worker() -> None:
+            # Poll RC connectivity in the background so unplug/replug updates mode
+            # color even when no manual refresh is triggered.
+            while not self._rc2_monitor_stop.is_set():
+                try:
+                    connected = self._vm.is_rc2_connected(timeout_seconds=4)
+                except Exception:
+                    connected = False
+
+                self._root.after(0, lambda c=connected: self._on_rc2_probe_result(c))
+                self._rc2_monitor_stop.wait(5.0)
+
+        self._rc2_monitor_thread = threading.Thread(target=_worker, daemon=True)
+        self._rc2_monitor_thread.start()
+
+    def _on_rc2_probe_result(self, connected: bool) -> None:
+        was_connected = self._rc2_last_probe_connected
+        self._rc2_last_probe_connected = connected
+        self._update_connection_mode(rc2_connected=connected)
+
+        if was_connected is None:
+            return
+
+        if (not was_connected) and connected:
+            self._log("RC-2 waypoint path detected. Triggering refresh.", level="INFO")
+            if self._busy or self._refresh_active:
+                self._refresh_pending = True
+                return
+            self._refresh()
+        elif was_connected and (not connected):
+            self._log("RC-2 waypoint path no longer available.", level="WARN")
 
     def _flush_path_entries(self) -> None:
         """Persist any unsaved path-entry edits (e.g. paste without pressing Enter)."""
@@ -890,33 +932,37 @@ class MainView:
         threading.Thread(target=_worker, daemon=True).start()
         self._root.after(50, self._drain_refresh_queue)
 
-    def _load_rc2_payload(self) -> tuple[list[RC2Mission], str | None, dict[str, bytes | None]]:
+    def _load_rc2_payload(
+        self,
+        preview_copy_timeout_seconds: int | None = None,
+    ) -> tuple[list[RC2Mission], str | None, dict[str, bytes | None]]:
         with self._rc2_scan_lock:
-            self._vm.clear_stale_preview_cache()
             missions = self._vm.load_rc2_missions()
             rc2_error = self._vm.consume_last_error()
-            preview_data: dict[str, bytes | None] = {}
 
-            for mission in missions:
-                path = self._vm.get_mission_preview_path(mission.guid)
-                data: bytes | None = None
-                if path and os.path.isfile(path):
-                    try:
-                        with open(path, "rb") as fh:
-                            data = fh.read()
-                    except OSError:
-                        data = None
+        preview_data: dict[str, bytes | None] = {}
 
-                    lowered = os.path.normpath(path).lower()
-                    if "djirc2kmzsync-previews" in lowered:
-                        try:
-                            os.remove(path)
-                        except OSError:
-                            pass
+        if missions:
+            self._log("Loading RC-2 mission preview thumbnails...", level="DEBUG")
 
-                preview_data[mission.guid] = data
+        for mission in missions:
+            data: bytes | None = None
+            path = self._vm.get_mission_preview_path(
+                mission.guid,
+                copy_timeout_seconds=preview_copy_timeout_seconds,
+                list_timeout_seconds=preview_copy_timeout_seconds,
+            )
 
-            return missions, rc2_error, preview_data
+            if path and os.path.isfile(path):
+                try:
+                    with open(path, "rb") as fh:
+                        data = fh.read()
+                except OSError:
+                    data = None
+
+            preview_data[mission.guid] = data
+
+        return missions, rc2_error, preview_data
 
     def _schedule_rc2_background_retry(self, reason: str) -> None:
         if self._rc2_retry_after_id is not None:
@@ -986,6 +1032,9 @@ class MainView:
                 if rc2_error:
                     self._schedule_rc2_background_retry("previous attempt failed")
                 else:
+                    # Retry succeeded, so treat probe state as connected to avoid
+                    # an immediate duplicate refresh from the monitor transition.
+                    self._rc2_last_probe_connected = True
                     self._cancel_rc2_background_retry(reset_attempts=True)
                     self._refresh_mapping()
                     self._update_connection_mode()
@@ -1011,6 +1060,8 @@ class MainView:
                 if rc2_error:
                     self._schedule_rc2_background_retry("initial/manual refresh failed")
                 else:
+                    # Manual/initial refresh succeeded with RC reachable.
+                    self._rc2_last_probe_connected = True
                     self._cancel_rc2_background_retry(reset_attempts=True)
                 if not self._refresh_pc_loaded:
                     self._set_status("RC-2 missions loaded. Loading PC files...")
@@ -1066,7 +1117,19 @@ class MainView:
             self._set_status(f"{count} mission{'s' if count != 1 else ''} found on RC-2.")
         self._log(f"RC-2 missions loaded: {count}")
         if last_error:
-            self._log(last_error, level="ERROR")
+            self._log(self._compact_error_message(last_error), level="ERROR")
+
+    @staticmethod
+    def _compact_error_message(message: str) -> str:
+        """Return the first useful line to avoid noisy traceback blocks in the UI log."""
+        text = (message or "").strip()
+        if not text:
+            return "Unknown error"
+
+        first_line = text.splitlines()[0].strip()
+        if first_line:
+            return first_line
+        return text
 
     def _render_rc2_tree(self) -> None:
         for row in self._rc2_tree.get_children():
@@ -1166,6 +1229,7 @@ class MainView:
 
     def _refresh_mapping(self) -> None:
         rows, updated_at, note = self._vm.get_copy_mapping_summary()
+        mapping_changed = rows != self._mapping_rows
         self._mapping_rows = rows
         self._mapping_updated_var.set(f"Updated: {updated_at or 'n/a'}")
         self._mapping_note_var.set(note)
@@ -1186,7 +1250,7 @@ class MainView:
                 ),
             )
 
-        if self._last_rc2_missions:
+        if mapping_changed and self._last_rc2_missions:
             self._render_rc2_tree()
 
     # ------------------------------------------------------------------
@@ -1230,7 +1294,10 @@ class MainView:
         self._status_var.set(text)
         self._status_label.configure(fg=colour)
 
-    def _update_connection_mode(self) -> None:
+    def _update_connection_mode(self, rc2_connected: bool | None = None) -> None:
+        if rc2_connected is not None:
+            self._rc2_connected = rc2_connected
+
         mode = self._vm.get_rc2_connection_mode()
         colours = {
             "MTP": (_MODE_BG, _MODE_FG),
@@ -1240,7 +1307,13 @@ class MainView:
             "Not Set": ("#f3f4f6", _TEXT_DIM),
         }
         bg, fg = colours.get(mode, ("#f3f4f6", _TEXT_DIM))
-        self._mode_var.set(f"Mode: {mode}")
+        mode_text = mode
+        if mode == "MTP" and self._rc2_connected:
+            bg, fg = ("#15803d", "#ffffff")
+        elif mode == "MTP":
+            mode_text = "Not Connected"
+
+        self._mode_var.set(f"Mode: {mode_text}")
         self._mode_label.configure(bg=bg, fg=fg)
 
     def _set_busy(self, busy: bool, message: str) -> None:

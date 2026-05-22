@@ -130,7 +130,7 @@ Example kmz_sync_config.json:
 {
   "rc2_folder": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint",
   "pc_folder": "C:\\Drone\\RC2Missions",
-  "rc2_refresh_retry_interval_seconds": 30
+  "rc2_refresh_retry_interval_seconds": 5
 }
 ```
 

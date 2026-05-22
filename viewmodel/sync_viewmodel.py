@@ -427,7 +427,11 @@ foreach ($segment in $segments) {{
 {body}
 """
 
-    def _list_mtp_items(self, mtp_path: str) -> Tuple[bool, List[dict[str, Any]] | str]:
+    def _list_mtp_items(
+        self,
+        mtp_path: str,
+        timeout_seconds: int | None = None,
+    ) -> Tuple[bool, List[dict[str, Any]] | str]:
         script = self._mtp_script(
             mtp_path,
             """
@@ -457,7 +461,7 @@ if ($items) {
         )
         return self._run_powershell_json(
             script,
-            timeout_seconds=self.MTP_LIST_TIMEOUT_SECONDS,
+            timeout_seconds=timeout_seconds or self.MTP_LIST_TIMEOUT_SECONDS,
         )
 
     def _list_mtp_missions_bulk(self, mtp_path: str) -> Tuple[bool, List[dict[str, Any]] | str]:
@@ -623,6 +627,7 @@ Write-Output $folderName
         mtp_folder: str,
         filename: str,
         local_dest_path: str,
+        timeout_seconds: int | None = None,
     ) -> Tuple[bool, str]:
         script = self._mtp_script(
             mtp_folder,
@@ -679,7 +684,7 @@ Write-Output $destPath
         )
         return self._run_powershell(
             script,
-            timeout_seconds=self.MTP_COPY_TIMEOUT_SECONDS,
+            timeout_seconds=timeout_seconds or self.MTP_COPY_TIMEOUT_SECONDS,
         )
 
     @staticmethod
@@ -786,12 +791,19 @@ Write-Output $destPath
                     pass
         os.replace(temp_path, cache_path)
 
-    def _list_mtp_items_cached(self, mtp_path: str) -> Tuple[bool, List[dict[str, Any]] | str]:
+    def _list_mtp_items_cached(
+        self,
+        mtp_path: str,
+        timeout_seconds: int | None = None,
+    ) -> Tuple[bool, List[dict[str, Any]] | str]:
         cached = self._mtp_preview_items_cache.get(mtp_path)
         if cached is not None:
             return True, cached
 
-        ok, result = self._list_mtp_items(mtp_path)
+        if timeout_seconds is None:
+            ok, result = self._list_mtp_items(mtp_path)
+        else:
+            ok, result = self._list_mtp_items(mtp_path, timeout_seconds=timeout_seconds)
         if ok:
             items = result if isinstance(result, list) else []
             self._mtp_preview_items_cache[mtp_path] = items
@@ -833,7 +845,13 @@ Write-Output $destPath
                     pass
         return None
 
-    def get_mission_preview_path(self, guid: str) -> str | None:
+    def get_mission_preview_path(
+        self,
+        guid: str,
+        copy_timeout_seconds: int | None = None,
+        list_timeout_seconds: int | None = None,
+        allow_live_fetch: bool = True,
+    ) -> str | None:
         root = (self._config.rc2_folder or "").strip()
         if not root:
             return None
@@ -844,8 +862,14 @@ Write-Output $destPath
             if cached:
                 return cached
 
+            if not allow_live_fetch:
+                return None
+
             preview_folder = self._mtp_join(root, "map_preview")
-            ok_items, item_result = self._list_mtp_items_cached(preview_folder)
+            ok_items, item_result = self._list_mtp_items_cached(
+                preview_folder,
+                timeout_seconds=list_timeout_seconds,
+            )
             if not ok_items:
                 return None
 
@@ -862,7 +886,10 @@ Write-Output $destPath
                 nested_folder = self._choose_preview_folder_name(guid, folder_names)
                 if nested_folder:
                     source_folder = self._mtp_join(preview_folder, nested_folder)
-                    ok_nested, nested_result = self._list_mtp_items_cached(source_folder)
+                    ok_nested, nested_result = self._list_mtp_items_cached(
+                        source_folder,
+                        timeout_seconds=list_timeout_seconds,
+                    )
                     if ok_nested:
                         nested_items = nested_result if isinstance(nested_result, list) else []
                         preview_name = self._choose_preview_name_from_items(guid, nested_items)
@@ -871,7 +898,10 @@ Write-Output $destPath
             # map_preview|<guid> directly as a fallback for nested previews.
             if not preview_name:
                 source_folder = self._mtp_join(preview_folder, guid)
-                ok_nested, nested_result = self._list_mtp_items_cached(source_folder)
+                ok_nested, nested_result = self._list_mtp_items_cached(
+                    source_folder,
+                    timeout_seconds=list_timeout_seconds,
+                )
                 if ok_nested:
                     nested_items = nested_result if isinstance(nested_result, list) else []
                     preview_name = self._choose_preview_name_from_items(guid, nested_items)
@@ -882,7 +912,15 @@ Write-Output $destPath
             ext = os.path.splitext(preview_name)[1].lower() or ".jpg"
             cache_path = f"{cache_base}{ext}"
             temp_copy = self._cache_temp_copy_path(cache_path)
-            ok, _ = self._copy_file_from_mtp_folder(source_folder, preview_name, temp_copy)
+            if copy_timeout_seconds is None:
+                ok, _ = self._copy_file_from_mtp_folder(source_folder, preview_name, temp_copy)
+            else:
+                ok, _ = self._copy_file_from_mtp_folder(
+                    source_folder,
+                    preview_name,
+                    temp_copy,
+                    timeout_seconds=copy_timeout_seconds,
+                )
             if ok and self._is_usable_preview_file(temp_copy):
                 self._promote_cache_copy(temp_copy, cache_path)
                 return cache_path
@@ -898,6 +936,9 @@ Write-Output $destPath
             cached = self._find_usable_cached_preview(cache_base, guid)
             if cached:
                 return cached
+
+            if not allow_live_fetch:
+                return None
 
             remote_root = self._adb_remote_root(root)
             preview_dir = self._adb_remote_join(remote_root, "map_preview")
@@ -1129,6 +1170,22 @@ if ($devices) {
         if root:
             return "Unavailable"
         return "Not Set"
+
+    def is_rc2_connected(self, timeout_seconds: int | None = None) -> bool:
+        """Best-effort connectivity probe for the currently configured RC-2 root."""
+        root = (self._config.rc2_folder or "").strip()
+        if not root:
+            return False
+
+        if self._is_mtp_path(root):
+            ok, _ = self._list_mtp_items(root, timeout_seconds=timeout_seconds)
+            return ok
+
+        if self._is_adb_path(root):
+            ok, _ = self.get_adb_status()
+            return ok
+
+        return os.path.isdir(root)
 
     @property
     def pc_folder(self) -> str:

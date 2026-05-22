@@ -7,7 +7,7 @@ CONFIG_FILE = "kmz_sync_config.json"
 _DEFAULTS = {
     "rc2_folder": "",
     "pc_folder": "",
-    "rc2_refresh_retry_interval_seconds": 30,
+    "rc2_refresh_retry_interval_seconds": 5,
 }
 
 _MIN_RETRY_SECONDS = 1
