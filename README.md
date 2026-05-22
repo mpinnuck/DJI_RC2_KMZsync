@@ -1,110 +1,160 @@
 # DJI RC-2 KMZ Mission Sync
 
-A desktop utility for syncing Dronelink KMZ missions to DJI RC-2 waypoint slots.
+Desktop utility for syncing Dronelink KMZ missions between PC and DJI RC-2 mission slots.
 
-This project is designed for Windows + RC-2 workflows where waypoint files are accessed via:
-- MTP (Explorer-style device access)
+## Quick Start (60 seconds)
+
+```powershell
+.venv\Scripts\Activate.ps1
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe djirc2kmzsync.py
+```
+
+In the app:
+1. Set RC-2 Root and PC KMZ Folder.
+2. Click Sync and wait for both lists.
+3. Select RC-2 mission slot + PC KMZ.
+4. Click left COPY (PC to RC-2).
+5. After RC edits, click right COPY (RC-2 to PC) to pull updates back.
+
+## Build Quick Start
+
+```powershell
+.venv\Scripts\python.exe -m pip install pyinstaller
+.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean DJI_RC2_KMZsync.spec
+```
+
+Distribute the full dist\DJI_RC2_KMZsync folder (exe + _internal).
+
+Supported RC-2 access modes:
+- MTP (recommended, Explorer-style)
 - ADB (optional)
 - Local filesystem path (when available)
 
-## What It Does
+## Features
 
-- Lists RC-2 mission slots from the configured waypoint root.
-- Shows mission preview thumbnails in the RC-2 list.
-- Displays mission details with:
-  - Active KMZ filename
-  - GUID slot ID
-  - Last modified timestamp (when available)
-- Filters RC-2 missions by name, GUID, or timestamp.
-- Copies a selected PC KMZ into a selected RC-2 mission slot.
-- Runs copy in the background (UI stays responsive).
-- Logs all operations in the in-app Activity Log (no modal popups).
+- Loads RC-2 mission slots and PC KMZ files side-by-side.
+- Shows RC-2 mission previews (Pillow-backed image decode).
+- Sorts RC-2 missions newest-first when timestamp is available.
+- Uploads PC KMZ into a selected RC-2 mission slot (overwrite flow).
+- Copies RC-2 mission KMZ back to PC using selected PC filename.
+- Tracks source-to-slot mapping in Mission Mapping tab.
+- Provides Quick Inspect and Deep Inspect mission diagnostics.
+- Runs copy/delete/refresh operations in background threads.
 
-## Important RC-2 Behavior
+## Dependencies
 
-- RC-2 mission display names edited on-device are likely stored in DJI app metadata/index, not inside the KMZ mission payload.
-- Overwriting an existing mission file can trigger RC-2 in-app "adjust/open" behavior.
-- Creating synthetic mission folders from PC side is not treated as reliable mission creation for RC-2 indexing.
+Runtime dependencies:
+- Windows 10/11
+- Python 3.10+ (tested with Python 3.14 in venv)
+- Pillow (mission preview decode)
 
-## Project Structure
+Optional tools:
+- ADB in PATH (only required for adb: mode)
 
-- `djirc2kmzsync.py`: App entry point.
-- `config/`: Config loading and persistence.
-- `model/`: Data models (`RC2Mission`, `KMZFile`).
-- `view/`: Tkinter UI.
-- `viewmodel/`: Sync logic for MTP/ADB/filesystem operations.
-- `tests/`: Unit tests.
+Development/build dependencies:
+- pytest
+- pyinstaller
 
-## Requirements
-
-- Windows
-- Python 3.10+ (tested in a venv)
-- Pillow (`PIL`) for JPEG preview decode
-- Optional: ADB for ADB-mode access
-
-## Setup
-
-1. Create and activate a virtual environment.
-2. Install dependencies:
+Install dependencies in venv:
 
 ```powershell
-pip install pillow pytest
+.venv\Scripts\Activate.ps1
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install pyinstaller
 ```
 
-## Run
+## Run From Source
 
 ```powershell
-python djirc2kmzsync.py
+.venv\Scripts\python.exe djirc2kmzsync.py
 ```
 
-## Configure
+## Configuration Files
 
-The app uses `kmz_sync_config.json` in the project root.
+The app uses two JSON files in the runtime base directory:
+- kmz_sync_config.json
+- kmz_copy_map.json
 
-Example:
+In source runs, this is the project working directory.
+In packaged runs, this is the folder containing DJI_RC2_KMZsync.exe.
+
+If missing, both files are auto-created on first launch.
+
+Example kmz_sync_config.json:
 
 ```json
 {
-    "rc2_folder": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint",
-  "pc_folder": "C:\\D_Drive\\Drone\\RC2Missions",
+  "rc2_folder": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint",
+  "pc_folder": "C:\\Drone\\RC2Missions",
   "rc2_refresh_retry_interval_seconds": 30
 }
 ```
 
-## Usage
+## Build (PyInstaller, onedir)
 
-1. Start app.
-2. Confirm `RC-2 Root` and `PC KMZ Folder`.
-3. Wait for initialization and mission load.
-4. Filter/select an RC-2 mission.
-5. Select a PC KMZ.
-6. Click `COPY`.
+The repository includes DJI_RC2_KMZsync.spec configured for onedir output.
 
-Copy behavior:
-- If an RC-2 mission is selected: copy overwrites that slot silently.
-- If no RC-2 mission is selected: copy is blocked with a log/status warning.
+Build command:
+
+```powershell
+.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean DJI_RC2_KMZsync.spec
+```
+
+Output folder:
+
+```text
+dist\DJI_RC2_KMZsync\
+  DJI_RC2_KMZsync.exe
+  _internal\
+  kmz_sync_config.json
+  kmz_copy_map.json
+```
+
+Important:
+- Distribute/copy the entire dist\DJI_RC2_KMZsync folder.
+- The exe requires _internal beside it in onedir mode.
+
+## Workflow: Add New KMZ, Fly, Edit On RC, Copy Back
+
+1. Connect RC-2 and launch the app.
+2. Confirm RC-2 Root and PC KMZ Folder paths.
+3. Click Sync and wait for both lists to load.
+4. In RC-2 mission list, select an existing mission slot to overwrite.
+5. In PC list, select the source KMZ.
+6. Click the left COPY button (PC to RC-2).
+7. Verify success in Activity Log and optional Mission Mapping tab.
+8. Fly the mission. If RC signal is lost, DJI may prompt mission adjust/open behavior.
+9. After editing on RC-2, reconnect and refresh.
+10. Select the edited RC-2 mission slot.
+11. Select the target PC KMZ filename to overwrite (or leave none for GUID default).
+12. Click the right COPY button (RC-2 to PC) to pull mission back.
+13. Confirm updated file on PC and review mapping row timestamp.
+
+Copy notes:
+- Upload and copy-back both overwrite existing target filenames when present.
+- Copy-back updates mapping so latest source/target relationship is visible.
 
 ## Diagnostics
 
-Use `Inspect Mission` in the Activity Log header to inspect:
-- Slot files
-- KMZ internal files
-- Name/title-like XML fields
-- Candidate metadata/history files near the waypoint root
+Use Activity Log actions:
+- Quick Inspect: fast slot + KMZ structure checks.
+- Deep Inspect: includes metadata-history and binary candidate probing.
+- Detect RC-2 and ADB Status: connectivity checks.
 
 ## Tests
 
-Run test suite:
+Run all tests:
 
 ```powershell
-python -m pytest tests/test_sync_viewmodel.py tests/test_models.py -q
+.venv\Scripts\python.exe -m pytest
 ```
 
 ## Notes on Timestamps
 
-- Local filesystem mode: uses file modified time.
-- MTP mode: uses Explorer detail metadata when available.
-- Invalid MTP sentinel dates (for example `12/30/1899 00:00:00`) are treated as unknown.
+- Filesystem mode uses local file modified timestamps.
+- MTP mode uses Explorer details metadata when available.
+- Invalid sentinel MTP dates (for example 12/30/1899 00:00:00) are treated as unknown.
 
 ## License
 
