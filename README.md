@@ -160,7 +160,7 @@ Important:
 
 1. Connect RC-2 and launch the app.
 2. Confirm RC-2 Root and PC KMZ Folder paths.
-3. Click Sync and wait for both lists to load.
+3. Wait for both lists to load.
 4. In RC-2 mission list, select an existing mission slot to overwrite.
 5. In PC list, select the source KMZ.
 6. Click the left COPY button (PC to RC-2).
