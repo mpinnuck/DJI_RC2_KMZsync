@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v1.7"
+_APP_VERSION = "v1.8"
 
 
 try:
@@ -40,6 +40,7 @@ _LOG_BG     = "#f8fafc"
 _LOG_BORDER = "#cbd5e1"
 _MODE_BG    = "#fff7ed"
 _MODE_FG    = "#9a3412"
+_DUMMY_SLOT_BG = "#eeeeee"
 
 _FONT_BODY  = ("Segoe UI", 10)
 _FONT_BOLD  = ("Segoe UI", 10, "bold")
@@ -125,6 +126,17 @@ class MainView:
             # Poll RC connectivity in the background so unplug/replug updates mode
             # color even when no manual refresh is triggered.
             while not self._rc2_monitor_stop.is_set():
+                rc_io_busy = (
+                    self._refresh_active
+                    or self._rc2_retry_in_progress
+                    or self._copy_in_progress
+                    or self._delete_in_progress
+                    or self._inspect_in_progress
+                )
+                if rc_io_busy:
+                    self._rc2_monitor_stop.wait(5.0)
+                    continue
+
                 try:
                     connected = self._vm.is_rc2_connected(timeout_seconds=4)
                 except Exception:
@@ -505,6 +517,7 @@ class MainView:
         tree.column("#0", width=92, minwidth=92, stretch=False, anchor=tk.CENTER)
         tree.column("slot", width=420, stretch=True)
         tree.tag_configure("empty", foreground=_TEXT_DIM)
+        tree.tag_configure("dummy_slot", background=_DUMMY_SLOT_BG)
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
@@ -533,7 +546,11 @@ class MainView:
                    command=self._on_copy).pack(padx=8, pady=4)
         ttk.Button(frame, text="COPY  ▶",
                    command=self._on_copy_back).pack(padx=8, pady=4)
-        tk.Label(frame, text="select one\nfrom each\npanel",
+        ttk.Button(frame, text="Set Dummy Slot",
+            command=self._set_dummy_slot).pack(padx=8, pady=4)
+        ttk.Button(frame, text="Restore\nDummy  ◀",
+            command=self._restore_dummy_slot).pack(padx=8, pady=4)
+        tk.Label(frame, text="select KMZ\nthen COPY\nto dummy slot",
                  bg=_BG, fg=_TEXT_DIM, font=_FONT_SMALL,
                  justify=tk.CENTER).pack(pady=(6, 0))
         tk.Frame(frame, bg=_BG).pack(expand=True, fill=tk.BOTH)
@@ -613,31 +630,40 @@ class MainView:
             self._log("Copy request ignored: copy is already in progress.", level="WARN")
             return
 
-        mission  = self._selected_mission()
+        if not self._can_run_rc2_file_operation("copy"):
+            return
+
         kmz_file = self._selected_kmz()
+        dummy_guid = self._vm.get_dummy_slot_guid().strip()
 
         if kmz_file is None:
             self._set_status("Select one KMZ file first.", colour=_ERROR)
             self._log("Copy blocked: no KMZ file selected.", level="WARN")
             return
 
+        if not dummy_guid:
+            self._set_status("Set the RC dummy mission slot first.", colour=_ERROR)
+            self._log("Copy blocked: dummy slot is not configured.", level="WARN")
+            return
+
+        mission = self._resolve_dummy_mission()
         if mission is None:
-            self._set_status("Select an existing RC-2 mission first.", colour=_ERROR)
+            self._set_status("Set or select the RC dummy mission slot first.", colour=_ERROR)
             self._log(
-                "Copy blocked: no RC-2 mission selected. RC-2 does not reliably index synthetic mission folders; use overwrite of an existing mission.",
+                "Copy blocked: configured dummy slot could not be resolved.",
                 level="WARN",
             )
             return
 
         dest_filename = mission.kmz_name if mission.kmz_name else f"{mission.guid}.kmz"
-        self._log(f"Copy requested: {kmz_file.filename} -> mission {mission.guid}", level="INFO")
+        self._log(f"Copy requested: {kmz_file.filename} -> dummy slot {mission.guid}", level="INFO")
         self._log(
             f"Copy started: source={kmz_file.full_path} | destination={mission.full_folder_path}\\{dest_filename}",
             level="INFO",
         )
         if mission.kmz_name:
             self._log(
-                f"Selected mission contains '{mission.kmz_name}'. Performing silent overwrite.",
+                f"Dummy slot contains '{mission.kmz_name}'. Attempting overwrite.",
                 level="INFO",
             )
         self._log(self._vm.confirm_copy_message(mission, kmz_file).replace("\n", " | "), level="INFO")
@@ -661,10 +687,69 @@ class MainView:
         threading.Thread(target=_worker, daemon=True).start()
         self._root.after(50, self._drain_copy_queue)
 
+    def _restore_dummy_slot(self) -> None:
+        if self._copy_in_progress:
+            self._set_status("Copy already in progress...", colour=_TEXT_DIM)
+            self._log("Restore dummy request ignored: copy is already in progress.", level="WARN")
+            return
+
+        if not self._can_run_rc2_file_operation("restore dummy"):
+            return
+
+        mission = self._resolve_dummy_mission()
+        if mission is None:
+            self._set_status("Set or select the RC dummy mission slot first.", colour=_ERROR)
+            self._log("Restore dummy blocked: dummy slot is not configured and no RC-2 mission is selected.", level="WARN")
+            return
+
+        kmz_file = self._find_pc_dummy_kmz_file()
+        if kmz_file is None:
+            self._set_status("dummy.kmz not found in PC KMZ list.", colour=_ERROR)
+            self._log("Restore dummy blocked: could not find dummy.kmz in PC source list.", level="WARN")
+            return
+
+        dest_filename = mission.kmz_name if mission.kmz_name else f"{mission.guid}.kmz"
+        self._log(f"Restore dummy requested: {kmz_file.filename} -> mission {mission.guid}", level="INFO")
+        self._log(
+            f"Restore dummy started: source={kmz_file.full_path} | destination={mission.full_folder_path}\\{dest_filename}",
+            level="INFO",
+        )
+
+        self._set_busy(True, "Restoring dummy slot...")
+        self._set_status("Restore dummy in progress...", colour=_TEXT_DIM)
+        self._copy_in_progress = True
+
+        def _worker() -> None:
+            started = time.monotonic()
+            try:
+                ok, msg = self._vm.execute_copy(mission, kmz_file)
+            except Exception as exc:
+                ok, msg = False, f"Unhandled restore dummy error: {exc}"
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._copy_queue.put((ok, msg, elapsed_ms))
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._root.after(50, self._drain_copy_queue)
+
+    def _set_dummy_slot(self) -> None:
+        mission = self._selected_mission()
+        if mission is None:
+            self._set_status("Select the RC dummy mission slot first.", colour=_ERROR)
+            self._log("Set dummy slot blocked: no RC-2 mission selected.", level="WARN")
+            return
+
+        self._vm.set_dummy_slot_guid(mission.guid)
+        self._render_rc2_tree()
+        self._set_status(f"Dummy slot set to {mission.guid}.", colour=_SUCCESS)
+        self._log(f"Dummy slot saved: {mission.guid}", level="OK")
+
     def _on_copy_back(self) -> None:
         if self._copy_in_progress:
             self._set_status("Copy already in progress...", colour=_TEXT_DIM)
             self._log("Copy-back request ignored: copy is already in progress.", level="WARN")
+            return
+
+        if not self._can_run_rc2_file_operation("copy-back"):
             return
 
         mission = self._selected_mission()
@@ -681,8 +766,11 @@ class MainView:
                 f"Copy-back target not selected. Defaulting target filename to {default_name}",
                 level="INFO",
             )
+            target_name = default_name
+        else:
+            target_name = target_kmz.filename
 
-        self._log(f"Copy-back requested: mission {mission.guid} -> {target_kmz.filename}", level="INFO")
+        self._log(f"Copy-back requested: mission {mission.guid} -> {target_name}", level="INFO")
         self._set_busy(True, "Copying mission back to PC...")
         self._set_status("Copy-back in progress...", colour=_TEXT_DIM)
         self._copy_in_progress = True
@@ -700,6 +788,9 @@ class MainView:
         self._root.after(50, self._drain_copy_queue)
 
     def _delete_selected_mission(self) -> None:
+        if not self._can_run_rc2_file_operation("delete"):
+            return
+
         mission = self._selected_mission()
         if mission is None:
             self._set_status("Select an RC-2 mission to delete.", colour=_ERROR)
@@ -1137,6 +1228,7 @@ class MainView:
         self._missions_by_guid = {}
         self._mission_preview_images = {}
         filter_text = self._rc2_filter_var.get().strip().lower()
+        dummy_slot_guid = self._vm.get_dummy_slot_guid().strip()
 
         sorted_missions = sorted(
             self._last_rc2_missions,
@@ -1152,7 +1244,11 @@ class MainView:
                     continue
 
             self._missions_by_guid[m.guid] = m
-            tag = "empty" if m.is_empty else ""
+            tags: list[str] = []
+            if m.is_empty:
+                tags.append("empty")
+            if dummy_slot_guid and m.guid == dummy_slot_guid:
+                tags.append("dummy_slot")
             preview_image = self._preview_image_for_mission(m.guid, self._last_preview_data.get(m.guid))
             timestamp_display = m.display_last_modified
             if source_kmz:
@@ -1162,7 +1258,7 @@ class MainView:
                                   iid=m.guid,
                                   image=preview_image,
                                   values=(slot_display,),
-                                  tags=(tag,))
+                                  tags=tuple(tags))
 
     def _mapped_source_kmz_for_guid(self, guid: str) -> str:
         target = (guid or "").strip().lower()
@@ -1253,6 +1349,25 @@ class MainView:
         if mapping_changed and self._last_rc2_missions:
             self._render_rc2_tree()
 
+    def _can_run_rc2_file_operation(self, operation: str) -> bool:
+        mode = self._vm.get_rc2_connection_mode()
+        if mode == "MTP" and not self._rc2_connected:
+            self._set_status("RC-2 not connected. Reconnect and refresh before retrying.", colour=_ERROR)
+            self._log(
+                f"{operation.capitalize()} blocked: RC-2 MTP path is currently unavailable. Reconnect and wait for list refresh.",
+                level="WARN",
+            )
+
+            # Auto-refresh so the UI can recover quickly after reconnect without
+            # requiring the user to press Refresh manually.
+            if self._busy or self._refresh_active:
+                self._refresh_pending = True
+            else:
+                self._log("Attempting automatic refresh after blocked operation.", level="INFO")
+                self._refresh()
+            return False
+        return True
+
     # ------------------------------------------------------------------
     # Selection helpers — return model objects
     # ------------------------------------------------------------------
@@ -1286,6 +1401,25 @@ class MainView:
         filename = values[0]
         full_path = os.path.join(self._vm.pc_folder, filename)
         return KMZFile(filename=filename, full_path=full_path)
+
+    def _find_pc_dummy_kmz_file(self) -> KMZFile | None:
+        for kmz_file in self._pc_files_by_item.values():
+            normalized = kmz_file.filename.replace("\\", "/")
+            if normalized.lower().endswith("/dummy.kmz") or normalized.lower() == "dummy.kmz":
+                return kmz_file
+        return None
+
+    def _resolve_dummy_mission(self) -> RC2Mission | None:
+        saved_guid = self._vm.get_dummy_slot_guid().strip()
+        if saved_guid:
+            mission = self._missions_by_guid.get(saved_guid)
+            if mission is not None:
+                return mission
+
+            folder_path = os.path.join(self._vm.rc2_folder, saved_guid)
+            return RC2Mission(guid=saved_guid, kmz_name="", full_folder_path=folder_path)
+
+        return self._selected_mission()
 
     # ------------------------------------------------------------------
     # Status bar

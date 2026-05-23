@@ -8,6 +8,7 @@ _DEFAULTS = {
     "rc2_folder": "",
     "pc_folder": "",
     "rc2_refresh_retry_interval_seconds": 5,
+    "dummy_slot_guid": "",
 }
 
 _MIN_RETRY_SECONDS = 1
@@ -79,6 +80,14 @@ class ConfigManager:
             parsed = _MAX_RETRY_SECONDS
 
         self._config["rc2_refresh_retry_interval_seconds"] = parsed
+
+    @property
+    def dummy_slot_guid(self) -> str:
+        return str(self._config.get("dummy_slot_guid", "") or "")
+
+    @dummy_slot_guid.setter
+    def dummy_slot_guid(self, value: str) -> None:
+        self._config["dummy_slot_guid"] = str(value or "").strip()
 
     def save(self) -> None:
         config_path = get_config_file_path()

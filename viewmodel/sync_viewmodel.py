@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
 import zipfile
 from datetime import datetime
@@ -35,6 +36,7 @@ class SyncViewModel:
     POWERSHELL_TIMEOUT_SECONDS = 30
     MTP_LIST_TIMEOUT_SECONDS = 120
     MTP_COPY_TIMEOUT_SECONDS = 30
+    MTP_WRITE_TIMEOUT_SECONDS = 30
     _RC2_NON_MISSION_FOLDERS = {"capability", "map_preview"}
     COPY_MAP_FILE = "kmz_copy_map.json"
 
@@ -42,6 +44,7 @@ class SyncViewModel:
         self._config = config
         self._last_error: str | None = None
         self._mtp_preview_items_cache: dict[str, List[dict[str, Any]]] = {}
+        self._mtp_operation_lock = threading.Lock()
         if copy_map_path:
             self._copy_map_path = copy_map_path
         else:
@@ -401,6 +404,24 @@ class SyncViewModel:
         quoted = ", ".join(cls._ps_single_quote(value) for value in values)
         return f"@({quoted})"
 
+    def _run_mtp_powershell(
+        self,
+        script: str,
+        timeout_seconds: int | None = None,
+    ) -> Tuple[bool, str]:
+        # MTP COM access can hang when multiple PowerShell sessions query/copy
+        # concurrently; serialize all MTP operations through one lock.
+        with self._mtp_operation_lock:
+            return self._run_powershell(script, timeout_seconds=timeout_seconds)
+
+    def _run_mtp_powershell_json(
+        self,
+        script: str,
+        timeout_seconds: int | None = None,
+    ) -> Tuple[bool, List[dict[str, Any]] | str]:
+        with self._mtp_operation_lock:
+            return self._run_powershell_json(script, timeout_seconds=timeout_seconds)
+
     @classmethod
     def _mtp_script(cls, mtp_path: str, body: str) -> str:
         segments = cls._ps_array_literal(cls._mtp_segments(mtp_path))
@@ -459,7 +480,7 @@ if ($items) {
 }
 """,
         )
-        return self._run_powershell_json(
+        return self._run_mtp_powershell_json(
             script,
             timeout_seconds=timeout_seconds or self.MTP_LIST_TIMEOUT_SECONDS,
         )
@@ -533,7 +554,7 @@ if ($result) {
 }
 """,
         )
-        return self._run_powershell_json(
+        return self._run_mtp_powershell_json(
             script,
             timeout_seconds=self.MTP_LIST_TIMEOUT_SECONDS,
         )
@@ -548,28 +569,9 @@ if (-not (Test-Path -LiteralPath $sourcePath)) {{
 }}
 
 $sourceName = [System.IO.Path]::GetFileName($sourcePath)
-$existing = $current.Items() | Where-Object {{ $_.Name -eq $sourceName }} | Select-Object -First 1
-if ($existing) {{
-    $existing.InvokeVerb('delete')
-
-    $deleteDeadline = (Get-Date).AddSeconds(10)
-    do {{
-        $remaining = $current.Items() | Where-Object {{ $_.Name -eq $sourceName }} | Select-Object -First 1
-        if (-not $remaining) {{
-            break
-        }}
-        [System.Threading.Thread]::Sleep(200)
-    }} while ((Get-Date) -lt $deleteDeadline)
-
-    $remaining = $current.Items() | Where-Object {{ $_.Name -eq $sourceName }} | Select-Object -First 1
-    if ($remaining) {{
-        throw "MTP overwrite failed to remove existing file: $sourceName"
-    }}
-}}
-
 $current.CopyHere($sourcePath, 0x614)
 
-$copyDeadline = (Get-Date).AddSeconds(15)
+$copyDeadline = (Get-Date).AddSeconds(30)
 $copied = $null
 do {{
     $copied = $current.Items() | Where-Object {{ $_.Name -eq $sourceName }} | Select-Object -First 1
@@ -586,7 +588,7 @@ if (-not $copied) {{
 Write-Output $sourceName
 """,
         )
-        return self._run_powershell(
+        return self._run_mtp_powershell(
             script,
             timeout_seconds=self.MTP_COPY_TIMEOUT_SECONDS,
         )
@@ -617,7 +619,7 @@ if (-not $existing) {{
 Write-Output $folderName
 """,
         )
-        return self._run_powershell(
+        return self._run_mtp_powershell(
             script,
             timeout_seconds=self.MTP_COPY_TIMEOUT_SECONDS,
         )
@@ -682,7 +684,7 @@ if (Test-Path -LiteralPath $stageDir) {{
 Write-Output $destPath
 """,
         )
-        return self._run_powershell(
+        return self._run_mtp_powershell(
             script,
             timeout_seconds=timeout_seconds or self.MTP_COPY_TIMEOUT_SECONDS,
         )
@@ -1152,6 +1154,65 @@ if ($devices) {
             return True, f"{message} RC-2 root updated to {detected_path}."
         return ok, message
 
+    def write_waypoint_text_file(self, filename: str = "temp.txt", content: str = "temp") -> Tuple[bool, str]:
+        """Write a small text file into the configured waypoint root."""
+        root = (self._config.rc2_folder or "").strip()
+        name = (filename or "").strip()
+        if not root:
+            return False, "RC-2 root is not configured."
+        if not name:
+            return False, "Filename is required."
+        if any(sep in name for sep in ("/", "\\")):
+            return False, "Filename must not include path separators."
+
+        fd, temp_path = tempfile.mkstemp(prefix="djirc2kmzsync-waypoint-", suffix=".txt")
+        os.close(fd)
+
+        try:
+            with open(temp_path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+
+            if self._is_mtp_path(root):
+                staged = temp_path
+                temp_dir: str | None = None
+                if os.path.basename(temp_path) != name:
+                    temp_dir = tempfile.mkdtemp(prefix="djirc2kmzsync-waypoint-stage-")
+                    staged = os.path.join(temp_dir, name)
+                    shutil.copy2(temp_path, staged)
+
+                try:
+                    ok, out = self._copy_file_to_mtp_folder(root, staged)
+                finally:
+                    if temp_dir:
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+
+                if not ok:
+                    return False, f"MTP write failed:\n{out}"
+                return True, f"Wrote {name} to {self._mtp_join(root, name)}"
+
+            if self._is_adb_path(root):
+                remote_root = self._adb_remote_root(root)
+                remote_dest = self._adb_remote_join(remote_root, name)
+                ok, out = self._run_adb(["push", temp_path, remote_dest])
+                if not ok:
+                    return False, f"ADB write failed:\n{out}"
+                return True, f"Wrote {name} to {remote_dest}"
+
+            if not os.path.isdir(root):
+                return False, f"RC-2 root folder not found:\n{root}"
+
+            dest_path = os.path.join(root, name)
+            with open(dest_path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            return True, f"Wrote {name} to {dest_path}"
+        except OSError as e:
+            return False, f"File operation failed:\n{e}"
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
     # ------------------------------------------------------------------
     # Properties (forwarded from config for convenience)
     # ------------------------------------------------------------------
@@ -1194,6 +1255,9 @@ if ($devices) {
     def get_rc2_refresh_retry_interval_seconds(self) -> int:
         return self._config.rc2_refresh_retry_interval_seconds
 
+    def get_dummy_slot_guid(self) -> str:
+        return self._config.dummy_slot_guid
+
     # ------------------------------------------------------------------
     # Folder update & persistence
     # ------------------------------------------------------------------
@@ -1208,6 +1272,10 @@ if ($devices) {
 
     def set_pc_folder(self, path: str) -> None:
         self._config.pc_folder = os.path.normpath(path)
+        self._config.save()
+
+    def set_dummy_slot_guid(self, guid: str) -> None:
+        self._config.dummy_slot_guid = guid
         self._config.save()
 
     # ------------------------------------------------------------------

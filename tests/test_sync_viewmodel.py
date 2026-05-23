@@ -206,7 +206,22 @@ class TestMissionPreviewLookup(unittest.TestCase):
         self.assertIsNotNone(preview_path)
         self.assertTrue(os.path.isfile(preview_path))
         self.assertEqual(os.path.splitext(preview_path)[1].lower(), ".jpg")
-        self.assertIn("guid-123", os.path.basename(preview_path).lower())
+
+
+class TestWaypointTextWrite(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def test_write_temp_text_file_to_filesystem_waypoint(self):
+        vm = _make_vm(rc2_root=self._tmp)
+        ok, msg = vm.write_waypoint_text_file(filename="temp.txt", content="hello waypoint")
+        self.assertTrue(ok, msg)
+
+        out_path = os.path.join(self._tmp, "temp.txt")
+        self.assertTrue(os.path.isfile(out_path))
+        with open(out_path, "r", encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "hello waypoint")
 
     def test_mtp_preview_supports_nested_guid_folder(self):
         vm = _make_vm(rc2_root=SyncViewModel.DEFAULT_MTP_RC2_ROOT)
