@@ -20,6 +20,28 @@ In the app:
 5. Click left COPY (PC to RC-2 dummy slot).
 6. After RC edits, click right COPY (RC-2 to PC) to pull updates back.
 
+## User Setup (First Time)
+
+Complete this once before normal use.
+
+1. On the RC, create a dummy mission with 2 waypoints.
+  - Open Waypoint mode on the RC.
+  - Create a simple mission with exactly two waypoints.
+  - Save it with a clear name such as Dummy Mission.
+  - This slot will be reused as the overwrite target for PC to RC uploads.
+2. Start the RC Sync app.
+  - Connect RC-2 to your PC.
+  - Launch DJI RC-2 KMZ Mission Sync.
+  - Set RC-2 Root and PC KMZ Folder if they are not already set.
+  - Click Sync/Refresh and wait until the RC and PC lists are populated.
+3. Set the dummy mission in the app.
+  - In the RC-2 mission list, click the dummy mission you created.
+  - Click Set Dummy Slot.
+  - Confirm the success message in the status/activity log.
+  - The configured dummy slot is highlighted in the RC-2 list.
+
+After setup, normal PC to RC copy only requires selecting a PC KMZ and clicking COPY.
+
 ## Build Quick Start
 
 ```powershell
@@ -161,35 +183,37 @@ Important:
 - Distribute/copy the entire dist\DJI_RC2_KMZsync folder.
 - The exe requires _internal beside it in onedir mode.
 
-## Workflow: Add New KMZ, Fly, Edit On RC, Copy Back
+## Workflow: Add Mission Using Dummy Slot
+
+Use this workflow to push a PC KMZ to RC-2, edit it on the RC, and pull the edited result back.
 
 1. Connect RC-2 and launch the app.
 2. Confirm RC-2 Root and PC KMZ Folder paths.
-3. Wait for both lists to load.
-4. In RC-2 mission list, select an existing mission slot to use as dummy.
-5. Click Set Dummy Slot.
-6. In PC list, select the source KMZ.
-7. Click the left COPY button (PC to RC-2 dummy slot).
-8. Verify success in Activity Log and optional Mission Mapping tab.
-9. Open the mission on RC-2.
-10. Select "Adjust and open new mission".
-11. Check mission speed change if required, then use "Set All".
-12. Check altitude of first and last waypoints, and adjust if required.
-13. Set RC Signal Lost behavior.
-14. Exit mission edit and save the mission.
-15. Edit the mission name as required.
-16. Open the original dummy mission and select "Cancel changes".
-17. Exit waypoint mode.
-18. Go back to this app on your PC.
-19. Reconnect RC-2 if needed, then click Sync/Refresh.
-20. Select the edited RC-2 mission slot.
-21. Select the target PC KMZ filename to overwrite (or leave none for GUID default).
-22. Click the right COPY button (RC-2 to PC) to pull mission back.
-23. Confirm updated file on PC and review mapping row timestamp.
-24. Fly the mission. If RC signal is lost, DJI may prompt mission adjust/open behavior.
+3. Click Sync/Refresh and wait for both lists.
+4. If first run (or dummy changed): select the RC dummy mission slot and click Set Dummy Slot.
+5. In PC list, select the source KMZ you want to upload.
+6. Click the left COPY button (PC to RC-2 dummy slot).
+7. Verify success in Activity Log and optional Mission Mapping tab.
+8. On RC-2, open the uploaded mission from the dummy slot.
+9. Select Adjust and open new mission.
+10. Apply mission edits (speed, altitude, signal-loss behavior, etc.).
+11. Save the new mission and rename as needed.
+12. Return to the app and click Sync/Refresh.
+13. Select the edited RC-2 mission slot.
+14. Select the target PC KMZ filename to overwrite (or leave none for GUID default).
+15. Click the right COPY button (RC-2 to PC) to pull the edited mission back.
+16. Confirm updated file on PC and review mapping timestamp.
+17. In the app, click Restore Dummy.
+18. On the RC, open the dummy mission.
+19. Select Adjust and open.
+20. Return to the RC mission list and click Save for the dummy mission. The cycle is now reset and ready for the next new-mission copy.
+
+Dummy slot notes:
+- Left COPY always targets the configured dummy slot.
+- You only need to run Set Dummy Slot again when you want to change dummy target slots.
 
 Copy notes:
-- Upload and copy-back both overwrite existing target filenames when present.
+- Upload and copy-back overwrite existing target filenames when present.
 - Copy-back updates mapping so latest source/target relationship is visible.
 
 ## Diagnostics
