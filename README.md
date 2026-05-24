@@ -4,6 +4,24 @@ Desktop utility for syncing Dronelink KMZ missions between PC and DJI RC-2 missi
 
 Note: This app and workflow are intended for DJI drones where DJI has not provided a public SDK integration path, such as the Air 3S.
 
+## Motivation
+
+This app was created after repeated attempts to use DJI injector-style tools failed in both macOS and Windows VM environments.
+
+In testing, the RC-2 appeared correctly in Windows Explorer inside the VM, so MTP looked available. However, injector workflows still failed. The most likely reason is architectural:
+
+- Explorer and the Windows Shell already own the active MTP session.
+- Many injector tools use a lower-level MTP path (for example raw/libmtp-style access) and attempt to open their own device session.
+- In VMs, MTP passthrough can be partial: basic browsing works, but some lower-level operations fail or are dropped.
+
+This app uses PowerShell plus Windows Shell COM (Shell.Application), which operates through the same Shell MTP layer as Explorer. That means it works with the session Windows already has, instead of competing for exclusive access.
+
+Practical outcome:
+
+- Reliable behavior in the exact VM setups where injector tools failed.
+- No need to eject Explorer access or switch modes just to copy mission files.
+- A workflow designed around overwrite-safe dummy slot injection and round-trip editing.
+
 ## Quick Start (60 seconds)
 
 ```powershell
