@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v1.8"
+_APP_VERSION = "v1.9"
 
 
 try:
@@ -546,13 +546,13 @@ class MainView:
                    command=self._on_copy).pack(padx=8, pady=4)
         ttk.Button(frame, text="COPY  ▶",
                    command=self._on_copy_back).pack(padx=8, pady=4)
-        ttk.Button(frame, text="Set Dummy Slot",
-            command=self._set_dummy_slot).pack(padx=8, pady=4)
         ttk.Button(frame, text="Restore\nDummy  ◀",
             command=self._restore_dummy_slot).pack(padx=8, pady=4)
         tk.Label(frame, text="select KMZ\nthen COPY\nto dummy slot",
                  bg=_BG, fg=_TEXT_DIM, font=_FONT_SMALL,
                  justify=tk.CENTER).pack(pady=(6, 0))
+        ttk.Button(frame, text="Set Dummy Slot",
+            command=self._set_dummy_slot).pack(padx=8, pady=(8, 4))
         tk.Frame(frame, bg=_BG).pack(expand=True, fill=tk.BOTH)
 
     # ------------------------------------------------------------------
@@ -761,12 +761,20 @@ class MainView:
             return
 
         if target_kmz is None:
-            default_name = f"{mission.guid}.kmz"
+            dummy_guid = self._vm.get_dummy_slot_guid().strip()
+            if dummy_guid and mission.guid == dummy_guid:
+                default_name = "dummy.kmz"
+            else:
+                default_name = f"{mission.guid}.kmz"
             self._log(
                 f"Copy-back target not selected. Defaulting target filename to {default_name}",
                 level="INFO",
             )
             target_name = default_name
+            target_kmz = KMZFile(
+                filename=default_name,
+                full_path=os.path.join(self._vm.pc_folder, default_name),
+            )
         else:
             target_name = target_kmz.filename
 
@@ -866,7 +874,6 @@ class MainView:
             self._set_status(f"✔  {msg.splitlines()[0]}", colour=_SUCCESS)
             self._log(msg.replace("\n", " | "), level="OK")
             self._log(f"Copy completed in {elapsed_ms} ms", level="DEBUG")
-            self._refresh_mapping()
             self._refresh()
             return
 
@@ -1127,7 +1134,7 @@ class MainView:
                     # an immediate duplicate refresh from the monitor transition.
                     self._rc2_last_probe_connected = True
                     self._cancel_rc2_background_retry(reset_attempts=True)
-                    self._refresh_mapping()
+                    self._refresh_mapping(rerender_rc2=False)
                     self._update_connection_mode()
                     self._log("RC-2 list background refresh successful.", level="INFO")
                 continue
@@ -1171,7 +1178,7 @@ class MainView:
                 elapsed_ms = payload[2]
                 self._refresh_active = False
                 if not self._refresh_error_seen:
-                    self._refresh_mapping()
+                    self._refresh_mapping(rerender_rc2=False)
                     self._update_connection_mode()
                     self._set_status("Ready.")
                     self._set_busy(False, "")
@@ -1323,7 +1330,7 @@ class MainView:
         if last_error:
             self._log(last_error, level="ERROR")
 
-    def _refresh_mapping(self) -> None:
+    def _refresh_mapping(self, rerender_rc2: bool = True) -> None:
         rows, updated_at, note = self._vm.get_copy_mapping_summary()
         mapping_changed = rows != self._mapping_rows
         self._mapping_rows = rows
@@ -1346,7 +1353,7 @@ class MainView:
                 ),
             )
 
-        if mapping_changed and self._last_rc2_missions:
+        if rerender_rc2 and mapping_changed and self._last_rc2_missions:
             self._render_rc2_tree()
 
     def _can_run_rc2_file_operation(self, operation: str) -> bool:
