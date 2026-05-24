@@ -47,7 +47,7 @@ In the app:
 2. Click Sync/Refresh and wait for both lists.
 3. In RC-2 list, select the mission slot you want to use as dummy, then click Set Dummy Slot.
 4. In PC list, select the source KMZ.
-5. Click left COPY (PC to RC-2 dummy slot).
+5. Click left COPY (PC to selected RC mission, or to dummy slot if no RC mission is selected).
 6. After RC edits, click right COPY (RC-2 to PC) to pull updates back.
 
 Air 3S note:
@@ -83,7 +83,8 @@ Complete this once before normal use.
   - Confirm `dummy.kmz` appears in the PC list after Sync/Refresh.
 
 How the dummy is used:
-- Left COPY always writes the selected PC KMZ into the configured dummy slot on RC-2.
+- Left COPY writes the selected PC KMZ into the selected RC mission slot.
+- If no RC mission is selected, Left COPY writes to the configured dummy slot.
 - RC-2 then creates a new mission from that loaded content when you use Adjust and open new mission and save.
 - Right COPY with the dummy slot selected and no PC target selected writes to `dummy.kmz` in the PC KMZ folder root.
 - Restore Dummy writes `dummy.kmz` from the PC KMZ folder back into the dummy slot.
@@ -240,29 +241,32 @@ Use this workflow to push a PC KMZ to RC-2, edit it on the RC, and pull the edit
 
 1. Connect RC-2 and launch the app.
 2. Confirm RC-2 Root and PC KMZ Folder paths.
-3. Click Sync/Refresh and wait for both lists.
-4. If first run (or dummy changed): select the RC dummy mission slot and click Set Dummy Slot.
-5. In PC list, select the source KMZ you want to upload.
-6. Click the left COPY button (PC to RC-2 dummy slot).
-7. Verify success in Activity Log and optional Mission Mapping tab.
-8. On RC-2, open the uploaded mission from the dummy slot.
-9. Select Adjust and open new mission.
-10. Apply mission edits (speed, altitude, signal-loss behavior, etc.).
-11. Save the new mission and rename as needed.
-12. Return to the app and click Sync/Refresh.
-13. Select the edited RC-2 mission slot.
-14. Select the target PC KMZ filename to overwrite (or leave none for GUID default).
-15. Click the right COPY button (RC-2 to PC) to pull the edited mission back.
-16. Confirm updated file on PC and review mapping timestamp.
-17. Select the configured dummy slot in RC-2 and click right COPY with no PC target selected to refresh `dummy.kmz`.
-18. Confirm `dummy.kmz` is updated in the PC KMZ folder root.
-19. In the app, click Restore Dummy.
-20. On the RC, open the dummy mission.
-21. Select Adjust and open.
-22. Return to the RC mission list and click Save for the dummy mission. The cycle is now reset and ready for the next new-mission copy.
+3. Click Refresh.
+4. On first startup refresh, the app saves a baseline GUID list and does not mark rows as new.
+5. If first run (or dummy mission changed), select the RC dummy mission slot and click Set Dummy Slot.
+6. In PC list, select the new mission source KMZ you want to upload.
+7. Click the left COPY button (this will copy the selected PC kmz to the selected RC mission, or to the dummy mission if no RC mission is selected).
+8. Verify success in Activity Log and optional Mission Mapping tab.
+9. On RC-2, open the dummy mission.
+10. The RC will prompt to Select "Adjust and open new mission".
+11. Apply mission edits (global speed, review altitudes, signal-loss behavior, etc.).
+12. Save the new mission and rename on the RC as needed.
+13. Return to the app and click Refresh.
+14. Identify the newly created RC mission slot:
+  - New GUID rows are highlighted light green for that refresh cycle.
+  - On the next refresh, that row returns to normal background.
+  - also the new mission will be associated with a PC kmz, the dummy mission will be associated with the new mission
+15. Click the new mission to view the larger preview image in the right panel.
+16. Double-click the preview image to open a large popup map preview; the popup follows slot selection while open.
+17. Select the target PC KMZ filename to overwrite (or leave none selected for GUID default filename).
+18. Click the right COPY button (copies the updated RC-2 kmz to the PC) to pull the edited mission back.
+19. Confirm the updated file on PC, the new RC mission is now associated the new PC kmz and review mapping timestamp.
+20. In the app, click Restore Dummy, this copies the PC dummy.kmz back to the dummy mission.
+21. On the RC, open the dummy mission, select "Adjust and open" if propted, then return to the RC mission list and click Save for the dummy mission. The cycle is reset and ready for the next new-mission copy.
 
 Dummy slot notes:
-- Left COPY always targets the configured dummy slot.
+- Left COPY targets the selected RC mission when one is selected.
+- Left COPY targets the configured dummy slot only when no RC mission is selected.
 - You only need to run Set Dummy Slot again when you want to change dummy target slots.
 
 Copy notes:

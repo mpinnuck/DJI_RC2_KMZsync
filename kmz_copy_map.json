@@ -1,5 +1,5 @@
 {
-    "updated_at": "2026-05-24 11:55:38",
+    "updated_at": "2026-05-24 15:12:33",
     "note": "This map tracks file-level copy operations only. If RC-2 is opened with 'adjust/open as new', DJI app metadata may create a new mission record that diverges from this mapping.",
     "by_source": {
         "Home\\hornsby-sewage-work.kmz": {
@@ -239,15 +239,82 @@
                     "target_kmz_filename": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4.kmz",
                     "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
                     "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-24 14:38:25",
+                    "source_filename": "dummy.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\dummy.kmz",
+                    "target_mission_guid": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
+                    "target_kmz_filename": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-24 14:38:54",
+                    "source_filename": "dummy.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\dummy.kmz",
+                    "target_mission_guid": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
+                    "target_kmz_filename": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-24 14:40:57",
+                    "source_filename": "dummy.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\dummy.kmz",
+                    "target_mission_guid": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
+                    "target_kmz_filename": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-24 15:12:33",
+                    "source_filename": "dummy.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\dummy.kmz",
+                    "target_mission_guid": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
+                    "target_kmz_filename": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
+                    "connection_mode": "MTP"
                 }
             ],
             "last": {
-                "copied_at": "2026-05-24 11:55:38",
+                "copied_at": "2026-05-24 15:12:33",
                 "source_filename": "dummy.kmz",
                 "source_full_path": "Y:\\Drone\\Missions\\Air3s\\dummy.kmz",
                 "target_mission_guid": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
                 "target_kmz_filename": "F57E2957-BA21-4B4C-AB31-3F17AEAE25B4.kmz",
                 "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|F57E2957-BA21-4B4C-AB31-3F17AEAE25B4",
+                "connection_mode": "MTP"
+            }
+        },
+        "Home\\brick-pitt.kmz": {
+            "history": [
+                {
+                    "copied_at": "2026-05-24 14:44:10",
+                    "source_filename": "Home\\brick-pitt.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\brick-pitt.kmz",
+                    "target_mission_guid": "F13477CB-AD92-4CB5-846A-B335D80C31BA",
+                    "target_kmz_filename": "F13477CB-AD92-4CB5-846A-B335D80C31BA.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|F13477CB-AD92-4CB5-846A-B335D80C31BA",
+                    "connection_mode": "MTP"
+                },
+                {
+                    "copied_at": "2026-05-24 14:44:46",
+                    "source_filename": "Home\\brick-pitt.kmz",
+                    "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\brick-pitt.kmz",
+                    "target_mission_guid": "F13477CB-AD92-4CB5-846A-B335D80C31BA",
+                    "target_kmz_filename": "F13477CB-AD92-4CB5-846A-B335D80C31BA.kmz",
+                    "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|F13477CB-AD92-4CB5-846A-B335D80C31BA",
+                    "connection_mode": "MTP"
+                }
+            ],
+            "last": {
+                "copied_at": "2026-05-24 14:44:46",
+                "source_filename": "Home\\brick-pitt.kmz",
+                "source_full_path": "Y:\\Drone\\Missions\\Air3s\\Home\\brick-pitt.kmz",
+                "target_mission_guid": "F13477CB-AD92-4CB5-846A-B335D80C31BA",
+                "target_kmz_filename": "F13477CB-AD92-4CB5-846A-B335D80C31BA.kmz",
+                "target_folder_path": "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint|F13477CB-AD92-4CB5-846A-B335D80C31BA",
                 "connection_mode": "MTP"
             }
         }

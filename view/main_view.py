@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v1.9"
+_APP_VERSION = "v1.10"
 
 
 try:
@@ -55,8 +55,18 @@ class MainView:
         self._missions_by_guid: dict[str, RC2Mission] = {}
         self._last_rc2_missions: list[RC2Mission] = []
         self._last_preview_data: dict[str, bytes | None] = {}
+        self._previous_refresh_guids: set[str] = set()
+        self._new_guids_in_latest_refresh: set[str] = set()
+        self._rc2_guid_baseline_initialized = False
         self._mission_preview_images: dict[str, tk.PhotoImage] = {}
+        self._selected_preview_image: tk.PhotoImage | None = None
+        self._selected_preview_guid: str | None = None
         self._preview_placeholder: tk.PhotoImage | None = None
+        self._preview_large_placeholder: tk.PhotoImage | None = None
+        self._preview_popup: tk.Toplevel | None = None
+        self._preview_popup_label: tk.Label | None = None
+        self._preview_popup_image: tk.PhotoImage | None = None
+        self._preview_popup_resize_after_id: str | None = None
         self._refresh_queue: queue.Queue = queue.Queue()
         self._copy_queue: queue.Queue = queue.Queue()
         self._inspect_queue: queue.Queue = queue.Queue()
@@ -116,6 +126,8 @@ class MainView:
         self._cancel_rc2_background_retry(reset_attempts=False)
         self._rc2_monitor_stop.set()
         self._flush_path_entries()
+        if self._preview_popup is not None and self._preview_popup.winfo_exists():
+            self._preview_popup.destroy()
         self._root.destroy()
 
     def _start_rc2_connection_monitor(self) -> None:
@@ -290,6 +302,7 @@ class MainView:
         self._rc2_tree = self._mission_panel(main)
         self._copy_button_panel(main)
         self._pc_tree  = self._kmz_panel(main)
+        self._selected_preview_panel(main)
         self._bind_tree_clear_on_blank(self._rc2_tree)
         self._bind_tree_clear_on_blank(self._pc_tree)
         self._root.bind("<Escape>", self._clear_all_selections)
@@ -456,6 +469,7 @@ class MainView:
         for tree in (self._rc2_tree, self._pc_tree, self._mapping_tree):
             tree.selection_remove(tree.selection())
             tree.focus("")
+        self._set_large_preview(None)
         self._set_status("Selections cleared.", colour=_TEXT_DIM)
         return "break"
 
@@ -482,8 +496,9 @@ class MainView:
     # Left panel — RC-2 missions
     # ------------------------------------------------------------------
     def _mission_panel(self, parent) -> ttk.Treeview:
-        frame = tk.Frame(parent, bg=_PANEL_BG)
-        frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        frame = tk.Frame(parent, bg=_PANEL_BG, width=480)
+        frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
+        frame.pack_propagate(False)
 
         # Configure grid rows: top (fixed), middle (expanding), bottom (fixed)
         frame.grid_rowconfigure(1, weight=1)
@@ -515,9 +530,11 @@ class MainView:
         tree.heading("#0", text="Preview")
         tree.heading("slot", text="Mission (KMZ / Slot GUID / Last Modified)")
         tree.column("#0", width=92, minwidth=92, stretch=False, anchor=tk.CENTER)
-        tree.column("slot", width=420, stretch=True)
+        tree.column("slot", width=300, stretch=True)
         tree.tag_configure("empty", foreground=_TEXT_DIM)
         tree.tag_configure("dummy_slot", background=_DUMMY_SLOT_BG)
+        tree.tag_configure("new_mission", background="#dcfce7")
+        tree.bind("<<TreeviewSelect>>", self._on_rc2_selection_changed)
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
@@ -559,8 +576,9 @@ class MainView:
     # Right panel — PC KMZ files
     # ------------------------------------------------------------------
     def _kmz_panel(self, parent) -> ttk.Treeview:
-        frame = tk.Frame(parent, bg=_PANEL_BG)
-        frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        frame = tk.Frame(parent, bg=_PANEL_BG, width=320)
+        frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
+        frame.pack_propagate(False)
 
         # Configure grid rows: top (fixed), middle (expanding), bottom (fixed)
         frame.grid_rowconfigure(1, weight=1)
@@ -586,8 +604,8 @@ class MainView:
                                 show="tree headings", selectmode="browse")
         tree.heading("#0", text="Folder / Path")
         tree.heading("filename", text="KMZ Filename")
-        tree.column("#0", width=150, stretch=False)
-        tree.column("filename", width=300, stretch=True)
+        tree.column("#0", width=120, stretch=False)
+        tree.column("filename", width=190, stretch=True)
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
@@ -602,6 +620,42 @@ class MainView:
         )
 
         return tree
+
+    def _selected_preview_panel(self, parent) -> None:
+        frame = tk.Frame(parent, bg=_PANEL_BG, width=420)
+        frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(8, 0))
+        frame.pack_propagate(False)
+
+        top_frame = tk.Frame(frame, bg=_PANEL_BG)
+        top_frame.pack(fill=tk.X, padx=10, pady=(8, 2))
+        tk.Label(
+            top_frame,
+            text="Selected RC Mission Preview",
+            bg=_PANEL_BG,
+            fg=_ACCENT,
+            font=_FONT_TITLE,
+        ).pack(anchor=tk.W)
+        tk.Label(
+            top_frame,
+            text="larger image for easier location identification",
+            bg=_PANEL_BG,
+            fg=_TEXT_DIM,
+            font=_FONT_SMALL,
+        ).pack(anchor=tk.W, pady=(0, 4))
+
+        image_frame = tk.Frame(frame, bg=_PANEL_BG)
+        image_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 8))
+
+        self._selected_preview_label = tk.Label(
+            image_frame,
+            bg=_PANEL_BG,
+            image=self._preview_large_placeholder_image(),
+            borderwidth=1,
+            relief="solid",
+            cursor="hand2",
+        )
+        self._selected_preview_label.pack(fill=tk.BOTH, expand=True)
+        self._selected_preview_label.bind("<Double-Button-1>", self._on_preview_double_click)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -634,36 +688,43 @@ class MainView:
             return
 
         kmz_file = self._selected_kmz()
-        dummy_guid = self._vm.get_dummy_slot_guid().strip()
 
         if kmz_file is None:
             self._set_status("Select one KMZ file first.", colour=_ERROR)
             self._log("Copy blocked: no KMZ file selected.", level="WARN")
             return
 
-        if not dummy_guid:
-            self._set_status("Set the RC dummy mission slot first.", colour=_ERROR)
-            self._log("Copy blocked: dummy slot is not configured.", level="WARN")
-            return
-
-        mission = self._resolve_dummy_mission()
+        mission = self._selected_mission()
+        target_label = "selected slot"
         if mission is None:
-            self._set_status("Set or select the RC dummy mission slot first.", colour=_ERROR)
-            self._log(
-                "Copy blocked: configured dummy slot could not be resolved.",
-                level="WARN",
-            )
-            return
+            dummy_guid = self._vm.get_dummy_slot_guid().strip()
+            if not dummy_guid:
+                self._set_status("Select an RC mission or set the RC dummy mission slot first.", colour=_ERROR)
+                self._log(
+                    "Copy blocked: no RC mission selected and dummy slot is not configured.",
+                    level="WARN",
+                )
+                return
+
+            mission = self._resolve_dummy_mission()
+            if mission is None:
+                self._set_status("Set or select the RC dummy mission slot first.", colour=_ERROR)
+                self._log(
+                    "Copy blocked: configured dummy slot could not be resolved.",
+                    level="WARN",
+                )
+                return
+            target_label = "dummy slot"
 
         dest_filename = mission.kmz_name if mission.kmz_name else f"{mission.guid}.kmz"
-        self._log(f"Copy requested: {kmz_file.filename} -> dummy slot {mission.guid}", level="INFO")
+        self._log(f"Copy requested: {kmz_file.filename} -> {target_label} {mission.guid}", level="INFO")
         self._log(
             f"Copy started: source={kmz_file.full_path} | destination={mission.full_folder_path}\\{dest_filename}",
             level="INFO",
         )
         if mission.kmz_name:
             self._log(
-                f"Dummy slot contains '{mission.kmz_name}'. Attempting overwrite.",
+                f"Target slot contains '{mission.kmz_name}'. Attempting overwrite.",
                 level="INFO",
             )
         self._log(self._vm.confirm_copy_message(mission, kmz_file).replace("\n", " | "), level="INFO")
@@ -1202,6 +1263,15 @@ class MainView:
         last_error: str | None,
         preview_data: dict[str, bytes | None],
     ) -> None:
+        current_guids = {m.guid for m in missions}
+        if not self._rc2_guid_baseline_initialized:
+            # Startup refresh establishes baseline only; do not mark existing rows as new.
+            self._new_guids_in_latest_refresh = set()
+            self._rc2_guid_baseline_initialized = True
+        else:
+            self._new_guids_in_latest_refresh = current_guids - self._previous_refresh_guids
+        self._previous_refresh_guids = current_guids
+
         self._last_rc2_missions = list(missions)
         self._last_preview_data = dict(preview_data)
         self._render_rc2_tree()
@@ -1234,6 +1304,7 @@ class MainView:
             self._rc2_tree.delete(row)
         self._missions_by_guid = {}
         self._mission_preview_images = {}
+        self._set_large_preview(None)
         filter_text = self._rc2_filter_var.get().strip().lower()
         dummy_slot_guid = self._vm.get_dummy_slot_guid().strip()
 
@@ -1254,6 +1325,8 @@ class MainView:
             tags: list[str] = []
             if m.is_empty:
                 tags.append("empty")
+            if m.guid in self._new_guids_in_latest_refresh:
+                tags.append("new_mission")
             if dummy_slot_guid and m.guid == dummy_slot_guid:
                 tags.append("dummy_slot")
             preview_image = self._preview_image_for_mission(m.guid, self._last_preview_data.get(m.guid))
@@ -1389,6 +1462,13 @@ class MainView:
         folder_path = os.path.join(self._vm.rc2_folder, guid)
         return RC2Mission(guid=guid, kmz_name="", full_folder_path=folder_path)
 
+    def _on_rc2_selection_changed(self, _event=None) -> None:
+        mission = self._selected_mission()
+        if mission is None:
+            self._set_large_preview(None)
+            return
+        self._set_large_preview(mission)
+
     def _selected_kmz(self) -> KMZFile | None:
         sel = self._pc_tree.selection()
         if not sel:
@@ -1493,6 +1573,152 @@ class MainView:
             image.put("#cbd5e1", to=(79, 0, 80, 60))
             self._preview_placeholder = image
         return self._preview_placeholder
+
+    def _preview_large_placeholder_image(self) -> tk.PhotoImage:
+        if self._preview_large_placeholder is None:
+            image = tk.PhotoImage(width=400, height=340)
+            image.put("#e5e7eb", to=(0, 0, 400, 340))
+            image.put("#cbd5e1", to=(0, 0, 400, 2))
+            image.put("#cbd5e1", to=(0, 338, 400, 340))
+            image.put("#cbd5e1", to=(0, 0, 2, 340))
+            image.put("#cbd5e1", to=(398, 0, 400, 340))
+            self._preview_large_placeholder = image
+        return self._preview_large_placeholder
+
+    def _on_preview_double_click(self, _event=None) -> None:
+        guid = (self._selected_preview_guid or "").strip()
+        if not guid:
+            self._set_status("Select an RC mission first.", colour=_TEXT_DIM)
+            return
+
+        image_data = self._last_preview_data.get(guid)
+        if not image_data:
+            self._set_status("No preview image available for this mission.", colour=_TEXT_DIM)
+            return
+
+        if self._preview_popup is not None and self._preview_popup.winfo_exists():
+            self._preview_popup.deiconify()
+            self._preview_popup.lift()
+            self._preview_popup.focus_force()
+            self._refresh_preview_popup_image()
+            return
+
+        popup = tk.Toplevel(self._root)
+        self._preview_popup = popup
+        popup.title(f"Mission Preview - {guid}")
+        popup.configure(bg="#111827")
+        popup.minsize(900, 640)
+
+        screen_w = self._root.winfo_screenwidth()
+        screen_h = self._root.winfo_screenheight()
+        popup_w = min(1200, max(screen_w - 80, 900))
+        popup_h = min(860, max(screen_h - 80, 640))
+
+        # Keep popup vertically centered but shifted right so the RC list stays visible.
+        centered_x = (screen_w - popup_w) // 2
+        x = centered_x + int(screen_w * 0.12)
+        y = max((screen_h - popup_h) // 2, 0)
+        x = max(0, min(x, screen_w - popup_w))
+
+        popup.geometry(f"{popup_w}x{popup_h}+{x}+{y}")
+        popup.transient(self._root)
+
+        self._preview_popup_label = tk.Label(
+            popup,
+            bg="#111827",
+            image=self._preview_large_placeholder_image(),
+            borderwidth=0,
+            relief="flat",
+        )
+        self._preview_popup_label.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        popup.bind("<Configure>", self._on_preview_popup_configure)
+        popup.bind("<Escape>", lambda _e: self._close_preview_popup())
+        popup.protocol("WM_DELETE_WINDOW", self._close_preview_popup)
+
+        self._refresh_preview_popup_image()
+
+    def _on_preview_popup_configure(self, _event=None) -> None:
+        if self._preview_popup is None or not self._preview_popup.winfo_exists():
+            return
+
+        if self._preview_popup_resize_after_id is not None:
+            try:
+                self._preview_popup.after_cancel(self._preview_popup_resize_after_id)
+            except tk.TclError:
+                pass
+        self._preview_popup_resize_after_id = self._preview_popup.after(120, self._refresh_preview_popup_image)
+
+    def _close_preview_popup(self) -> None:
+        if self._preview_popup is not None and self._preview_popup.winfo_exists():
+            self._preview_popup.destroy()
+        self._preview_popup = None
+        self._preview_popup_label = None
+        self._preview_popup_image = None
+        self._preview_popup_resize_after_id = None
+
+    def _refresh_preview_popup_image(self) -> None:
+        if self._preview_popup is None or not self._preview_popup.winfo_exists():
+            return
+        if self._preview_popup_label is None or not self._preview_popup_label.winfo_exists():
+            return
+
+        guid = (self._selected_preview_guid or "").strip()
+        if not guid:
+            self._preview_popup_label.configure(image=self._preview_large_placeholder_image())
+            return
+
+        self._preview_popup.title(f"Mission Preview - {guid}")
+        image_data = self._last_preview_data.get(guid)
+        if not image_data or Image is None or ImageTk is None:
+            self._preview_popup_label.configure(image=self._preview_large_placeholder_image())
+            return
+
+        try:
+            with Image.open(io.BytesIO(image_data)) as opened:
+                rendered = opened.convert("RGB")
+                target_w = max(self._preview_popup_label.winfo_width() - 2, 1)
+                target_h = max(self._preview_popup_label.winfo_height() - 2, 1)
+                if target_w <= 1 or target_h <= 1:
+                    target_w, target_h = 1200, 860
+                resample_filter = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+                fitted = rendered.resize((target_w, target_h), resample=resample_filter)
+                self._preview_popup_image = ImageTk.PhotoImage(fitted)
+            self._preview_popup_label.configure(image=self._preview_popup_image)
+        except Exception:
+            self._preview_popup_image = None
+            self._preview_popup_label.configure(image=self._preview_large_placeholder_image())
+
+    def _set_large_preview(self, mission: RC2Mission | None) -> None:
+        if mission is None:
+            self._selected_preview_guid = None
+            self._selected_preview_image = None
+            self._selected_preview_label.configure(image=self._preview_large_placeholder_image())
+            self._refresh_preview_popup_image()
+            return
+
+        self._selected_preview_guid = mission.guid
+        image_data = self._last_preview_data.get(mission.guid)
+        if image_data and Image is not None and ImageTk is not None:
+            try:
+                with Image.open(io.BytesIO(image_data)) as opened:
+                    rendered = opened.convert("RGB")
+                    target_w = max(self._selected_preview_label.winfo_width() - 2, 1)
+                    target_h = max(self._selected_preview_label.winfo_height() - 2, 1)
+                    if target_w <= 1 or target_h <= 1:
+                        target_w, target_h = 400, 340
+                    resample_filter = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+                    fitted = rendered.resize((target_w, target_h), resample=resample_filter)
+                    self._selected_preview_image = ImageTk.PhotoImage(fitted)
+                self._selected_preview_label.configure(image=self._selected_preview_image)
+            except Exception:
+                self._selected_preview_image = None
+                self._selected_preview_label.configure(image=self._preview_large_placeholder_image())
+        else:
+            self._selected_preview_image = None
+            self._selected_preview_label.configure(image=self._preview_large_placeholder_image())
+
+        self._refresh_preview_popup_image()
 
     def _log(self, message: str, level: str = "INFO") -> None:
         if level == "ERROR":
