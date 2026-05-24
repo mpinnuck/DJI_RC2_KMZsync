@@ -38,6 +38,10 @@ In the app:
 5. Click left COPY (PC to RC-2 dummy slot).
 6. After RC edits, click right COPY (RC-2 to PC) to pull updates back.
 
+Air 3S note:
+- If you build missions in Dronelink, set PC KMZ Folder to your Dronelink KMZ export folder.
+- Export new Dronelink missions into that same folder so they appear in the app's PC list for sync.
+
 ## User Setup (First Time)
 
 Complete this once before normal use.
@@ -51,6 +55,7 @@ Complete this once before normal use.
   - Connect RC-2 to your PC.
   - Launch DJI RC-2 KMZ Mission Sync.
   - Set RC-2 Root and PC KMZ Folder if they are not already set.
+  - For Air 3S with Dronelink, point PC KMZ Folder at your Dronelink KMZ export directory.
   - Click Sync/Refresh and wait until the RC and PC lists are populated.
 3. Set the dummy mission in the app.
   - In the RC-2 mission list, click the dummy mission you created.
