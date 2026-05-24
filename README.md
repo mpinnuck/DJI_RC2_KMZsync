@@ -22,6 +22,18 @@ Practical outcome:
 - No need to eject Explorer access or switch modes just to copy mission files.
 - A workflow designed around overwrite-safe dummy slot injection and round-trip editing.
 
+## Platform Support
+
+Windows only (supported):
+
+- This app depends on Windows Shell MTP access (Shell.Application via PowerShell).
+- The MTP integration used by this app is a Windows-specific architecture.
+
+macOS (not supported):
+
+- macOS MTP access for RC-2 is not a supported path for this tool.
+- In practice, macOS workflows can require stopping/changing multiple services to get stable MTP access, which is outside the intended setup.
+
 ## Quick Start (60 seconds)
 
 ```powershell
@@ -97,6 +109,9 @@ Runtime dependencies:
 - Windows 10/11
 - Python 3.10+ (tested with Python 3.14 in venv)
 - Pillow (mission preview decode)
+
+Platform note:
+- This app is supported on Windows only.
 
 Optional tools:
 - ADB in PATH (only required for adb: mode)
