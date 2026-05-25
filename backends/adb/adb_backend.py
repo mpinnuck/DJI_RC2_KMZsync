@@ -160,6 +160,13 @@ class ADBBackend(RCBackend):
         remote = f"{folder.rstrip('/')}/{filename}"
         return self._pull_to_bytes(remote)
 
+    def delete_file(self, mission: RC2Mission, filename: str) -> Tuple[bool, str]:
+        remote = f"{mission.full_folder_path.rstrip('/')}/{filename}"
+        ok, out = self._run(["shell", "rm", "-f", remote])
+        if not ok:
+            return False, f"ADB delete failed:\n{out}"
+        return True, f"Deleted {filename} from {mission.guid}"
+
     # ------------------------------------------------------------------
     # File transfer -- PC to RC-2
     # ------------------------------------------------------------------

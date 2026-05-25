@@ -133,6 +133,14 @@ class RCBackend(ABC):
         candidates from parent folders of the waypoint root.
         """
 
+    @abstractmethod
+    def delete_file(self, mission: RC2Mission, filename: str) -> Tuple[bool, str]:
+        """
+        Delete a single file from a mission GUID slot folder.
+
+        Returns (success, message).
+        """
+
     # ------------------------------------------------------------------
     # File transfer -- PC to RC-2
     # ------------------------------------------------------------------

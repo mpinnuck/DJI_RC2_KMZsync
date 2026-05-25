@@ -299,6 +299,44 @@ class WindowsMTPBackend(RCBackend):
     ) -> Tuple[bool, bytes | str]:
         return self._read_bytes_from_mtp_folder(folder, filename)
 
+    def delete_file(self, mission: RC2Mission, filename: str) -> Tuple[bool, str]:
+        script = self._mtp_script(
+            mission.full_folder_path,
+            _MTP_SILENT_DELETE_ADDTYPE
+            + f"""
+$filename = {_ps_quote(filename)}
+$item = $current.Items() | Where-Object {{ $_.Name -eq $filename -and -not $_.IsFolder }} | Select-Object -First 1
+if (-not $item) {{
+    Write-Output "NOT_FOUND"
+    return
+}}
+
+[MtpFileOp]::SilentDelete($item)
+
+$deadline = (Get-Date).AddSeconds(8)
+do {{
+    [System.Threading.Thread]::Sleep(200)
+    $current = $shell.Namespace(17)
+    foreach ($seg in $segments) {{
+        $current = ($current.Items() | Where-Object {{ $_.Name -eq $seg }} | Select-Object -First 1).GetFolder
+    }}
+    $remaining = $current.Items() | Where-Object {{ $_.Name -eq $filename -and -not $_.IsFolder }} | Select-Object -First 1
+    if (-not $remaining) {{ break }}
+}} while ((Get-Date) -lt $deadline)
+
+$remaining = $current.Items() | Where-Object {{ $_.Name -eq $filename -and -not $_.IsFolder }} | Select-Object -First 1
+if ($remaining) {{
+    throw "MTP file delete did not complete for $filename"
+}}
+
+Write-Output "DELETED"
+""",
+        )
+        ok, out = self._run_mtp_ps(script, timeout_seconds=_MTP_COPY_TIMEOUT)
+        if not ok:
+            return False, f"MTP delete failed:\n{out}"
+        return True, f"Deleted {filename} from {mission.guid}"
+
     # ------------------------------------------------------------------
     # File transfer -- PC to RC-2
     # ------------------------------------------------------------------

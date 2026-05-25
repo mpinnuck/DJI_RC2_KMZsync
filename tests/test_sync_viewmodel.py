@@ -633,28 +633,28 @@ class TestGetAdbStatus(unittest.TestCase):
 
     def test_no_devices(self):
         vm = _make_vm(rc2_root="adb:/sdcard/Android/data/dji.go.v5/files/waypoint")
-        vm._run_adb = lambda _args: (True, "List of devices attached\n\n")
+        vm._rc_backend.get_status = lambda: (False, "No ADB devices detected.")
         ok, msg = vm.get_adb_status()
         self.assertFalse(ok)
         self.assertIn("no adb devices", msg.lower())
 
     def test_device_ready(self):
         vm = _make_vm(rc2_root="adb:/sdcard/Android/data/dji.go.v5/files/waypoint")
-        vm._run_adb = lambda _args: (True, "List of devices attached\nABC123\tdevice\n")
+        vm._rc_backend.get_status = lambda: (True, "ADB device connected: ABC123")
         ok, msg = vm.get_adb_status()
         self.assertTrue(ok)
         self.assertIn("ABC123", msg)
 
     def test_device_offline(self):
         vm = _make_vm(rc2_root="adb:/sdcard/Android/data/dji.go.v5/files/waypoint")
-        vm._run_adb = lambda _args: (True, "List of devices attached\nABC123\toffline\n")
+        vm._rc_backend.get_status = lambda: (False, "ADB device is offline.")
         ok, msg = vm.get_adb_status()
         self.assertFalse(ok)
         self.assertIn("offline", msg.lower())
 
     def test_device_unauthorized(self):
         vm = _make_vm(rc2_root="adb:/sdcard/Android/data/dji.go.v5/files/waypoint")
-        vm._run_adb = lambda _args: (True, "List of devices attached\nABC123\tunauthorized\n")
+        vm._rc_backend.get_status = lambda: (False, "ADB device is unauthorized.")
         ok, msg = vm.get_adb_status()
         self.assertFalse(ok)
         self.assertIn("unauthorized", msg.lower())

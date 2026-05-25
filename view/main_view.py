@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v2.0"
+_APP_VERSION = "v2.1"
 
 
 try:
@@ -94,6 +94,7 @@ class MainView:
         self._copy_in_progress = False
         self._inspect_in_progress = False
         self._delete_in_progress = False
+        self._force_mapping_rerender_on_next_refresh_done = False
         self._refresh_pending = False
         self._last_error_log_key: str | None = None
         self._last_error_log_time = 0.0
@@ -747,7 +748,7 @@ class MainView:
             except Exception as exc:
                 ok, msg = False, f"Unhandled copy error: {exc}"
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            self._copy_queue.put((ok, msg, elapsed_ms))
+            self._copy_queue.put(("copy_to_rc", ok, msg, elapsed_ms))
 
         threading.Thread(target=_worker, daemon=True).start()
         self._root.after(50, self._drain_copy_queue)
@@ -791,7 +792,7 @@ class MainView:
             except Exception as exc:
                 ok, msg = False, f"Unhandled restore dummy error: {exc}"
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            self._copy_queue.put((ok, msg, elapsed_ms))
+            self._copy_queue.put(("restore_dummy", ok, msg, elapsed_ms))
 
         threading.Thread(target=_worker, daemon=True).start()
         self._root.after(50, self._drain_copy_queue)
@@ -855,7 +856,7 @@ class MainView:
             except Exception as exc:
                 ok, msg = False, f"Unhandled copy-back error: {exc}"
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            self._copy_queue.put((ok, msg, elapsed_ms))
+            self._copy_queue.put(("copy_back", ok, msg, elapsed_ms))
 
         threading.Thread(target=_worker, daemon=True).start()
         self._root.after(50, self._drain_copy_queue)
@@ -931,11 +932,18 @@ class MainView:
                 self._root.after(50, self._drain_copy_queue)
             return
 
-        ok, msg, elapsed_ms = latest
+        if len(latest) == 4:
+            operation, ok, msg, elapsed_ms = latest
+        else:
+            # Backward compatibility for any legacy tuple shape.
+            operation = "copy_to_rc"
+            ok, msg, elapsed_ms = latest
         self._copy_in_progress = False
         self._set_busy(False, "")
 
         if ok:
+            if operation == "copy_back":
+                self._force_mapping_rerender_on_next_refresh_done = True
             self._set_status(f"✔  {msg.splitlines()[0]}", colour=_SUCCESS)
             self._log(msg.replace("\n", " | "), level="OK")
             self._log(f"Copy completed in {elapsed_ms} ms", level="DEBUG")
@@ -1197,7 +1205,9 @@ class MainView:
                     # an immediate duplicate refresh from the monitor transition.
                     self._rc2_last_probe_connected = True
                     self._cancel_rc2_background_retry(reset_attempts=True)
-                    self._refresh_mapping(rerender_rc2=False)
+                    rerender = self._force_mapping_rerender_on_next_refresh_done
+                    self._refresh_mapping(rerender_rc2=rerender)
+                    self._force_mapping_rerender_on_next_refresh_done = False
                     self._update_connection_mode()
                     self._log("RC-2 list background refresh successful.", level="INFO")
                 continue
@@ -1241,7 +1251,9 @@ class MainView:
                 elapsed_ms = payload[2]
                 self._refresh_active = False
                 if not self._refresh_error_seen:
-                    self._refresh_mapping(rerender_rc2=False)
+                    rerender = self._force_mapping_rerender_on_next_refresh_done
+                    self._refresh_mapping(rerender_rc2=rerender)
+                    self._force_mapping_rerender_on_next_refresh_done = False
                     self._update_connection_mode()
                     self._set_status("Ready.")
                     self._set_busy(False, "")
@@ -1266,13 +1278,22 @@ class MainView:
         preview_data: dict[str, bytes | None],
     ) -> None:
         current_guids = {m.guid for m in missions}
+        is_success = not bool(last_error)
+
         if not self._rc2_guid_baseline_initialized:
-            # Startup refresh establishes baseline only; do not mark existing rows as new.
+            # Startup baseline should be established only from a successful RC
+            # load; transient startup failures/empty-error snapshots must not
+            # cause the next successful load to mark everything as new.
             self._new_guids_in_latest_refresh = set()
-            self._rc2_guid_baseline_initialized = True
-        else:
+            if is_success:
+                self._previous_refresh_guids = current_guids
+                self._rc2_guid_baseline_initialized = True
+        elif is_success:
             self._new_guids_in_latest_refresh = current_guids - self._previous_refresh_guids
-        self._previous_refresh_guids = current_guids
+            self._previous_refresh_guids = current_guids
+        else:
+            # Do not mutate baseline/new markers on failed loads.
+            self._new_guids_in_latest_refresh = set()
 
         self._last_rc2_missions = list(missions)
         self._last_preview_data = dict(preview_data)
