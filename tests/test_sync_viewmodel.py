@@ -1,4 +1,5 @@
 import os
+import shutil
 import zipfile
 import subprocess
 import tempfile
@@ -28,6 +29,59 @@ def _make_vm(rc2_root: str = "", pc_root: str = "") -> SyncViewModel:
     return SyncViewModel(cfg, copy_map_path=map_path)
 
 
+def _install_fs_backend(vm: SyncViewModel, rc2_root: str) -> None:
+    """Patch vm._rc_backend to simulate RC-2 device ops using a local folder.
+
+    Allows tests that set up real filesystem fixtures to exercise the full
+    viewmodel call chain without invoking actual ADB/MTP commands.
+    """
+    vm._rc_backend.get_connection_mode = lambda: "ADB"
+
+    def _copy_to_device(folder_path: str, source_path: str, dest_filename: str):
+        if not os.path.isfile(source_path):
+            return False, f"Source not found: {source_path}"
+        if not os.path.isdir(folder_path):
+            return False, f"Destination folder not found: {folder_path}"
+        shutil.copy2(source_path, os.path.join(folder_path, dest_filename))
+        return True, dest_filename
+
+    def _copy_from_device(folder_path: str, source_filename: str, dest_path: str):
+        src = os.path.join(folder_path, source_filename)
+        if not os.path.isfile(src):
+            return False, f"Source not found: {src}"
+        os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+        shutil.copy2(src, dest_path)
+        return True, dest_path
+
+    def _delete_mission(mission: RC2Mission):
+        if not os.path.isdir(mission.full_folder_path):
+            return False, f"Folder not found: {mission.full_folder_path}"
+        shutil.rmtree(mission.full_folder_path)
+        return True, f"Deleted {mission.guid}"
+
+    def _list_slot_files(mission: RC2Mission):
+        if not os.path.isdir(mission.full_folder_path):
+            return False, f"Folder not found: {mission.full_folder_path}"
+        try:
+            return True, sorted(e.name for e in os.scandir(mission.full_folder_path))
+        except OSError as exc:
+            return False, str(exc)
+
+    def _read_file_bytes(mission: RC2Mission, filename: str):
+        path = os.path.join(mission.full_folder_path, filename)
+        try:
+            with open(path, "rb") as fh:
+                return True, fh.read()
+        except OSError as exc:
+            return False, str(exc)
+
+    vm._rc_backend.copy_file_to_device = _copy_to_device
+    vm._rc_backend.copy_file_from_device = _copy_from_device
+    vm._rc_backend.delete_mission = _delete_mission
+    vm._rc_backend.list_slot_files = _list_slot_files
+    vm._rc_backend.read_file_bytes = _read_file_bytes
+
+
 def _write(path: str, content: bytes = b"KMZ_DATA") -> None:
     with open(path, "wb") as f:
         f.write(content)
@@ -48,55 +102,45 @@ def _write_preview_jpeg(path: str) -> None:
 
 class TestLoadRC2Missions(unittest.TestCase):
 
-    def setUp(self):
-        self._tmp = tempfile.mkdtemp()
+    def test_returns_missions_from_backend(self):
+        vm = _make_vm(rc2_root=SyncViewModel.DEFAULT_ADB_RC2_ROOT)
+        expected = [
+            RC2Mission(guid="guid-aaa", kmz_name="aaa.kmz", full_folder_path="/fake/guid-aaa"),
+            RC2Mission(guid="guid-zzz", kmz_name="zzz.kmz", full_folder_path="/fake/guid-zzz"),
+        ]
+        vm._rc_backend.list_missions = lambda root: (expected, None)
+        self.assertEqual(vm.load_rc2_missions(), expected)
 
-    def test_empty_folder_returns_empty_list(self):
-        self.assertEqual(_make_vm(rc2_root=self._tmp).load_rc2_missions(), [])
+    def test_returns_empty_list_when_backend_returns_none(self):
+        vm = _make_vm(rc2_root=SyncViewModel.DEFAULT_ADB_RC2_ROOT)
+        vm._rc_backend.list_missions = lambda root: ([], None)
+        self.assertEqual(vm.load_rc2_missions(), [])
 
-    def test_single_populated_slot(self):
-        slot = os.path.join(self._tmp, "guid-0001")
-        os.makedirs(slot)
-        _write(os.path.join(slot, "mission.kmz"))
-        missions = _make_vm(rc2_root=self._tmp).load_rc2_missions()
-        self.assertEqual(len(missions), 1)
-        self.assertEqual(missions[0].guid, "guid-0001")
-        self.assertEqual(missions[0].kmz_name, "mission.kmz")
-        self.assertFalse(missions[0].is_empty)
+    def test_propagates_backend_error_message(self):
+        vm = _make_vm(rc2_root=SyncViewModel.DEFAULT_MTP_RC2_ROOT)
+        vm._rc_backend.list_missions = lambda root: ([], "Device not found")
+        result = vm.load_rc2_missions()
+        self.assertEqual(result, [])
+        self.assertIn("Device not found", vm._last_error or "")
 
-    def test_empty_slot_detected(self):
-        os.makedirs(os.path.join(self._tmp, "guid-empty"))
-        missions = _make_vm(rc2_root=self._tmp).load_rc2_missions()
-        self.assertEqual(len(missions), 1)
-        self.assertTrue(missions[0].is_empty)
+    def test_clears_last_error_before_each_call(self):
+        vm = _make_vm(rc2_root=SyncViewModel.DEFAULT_ADB_RC2_ROOT)
+        vm._last_error = "stale error"
+        vm._rc_backend.list_missions = lambda root: ([], None)
+        vm.load_rc2_missions()
+        self.assertIsNone(vm._last_error)
 
-    def test_multiple_slots_sorted_by_name(self):
-        for name in ("guid-zzz", "guid-aaa", "guid-mmm"):
-            os.makedirs(os.path.join(self._tmp, name))
-        guids = [m.guid for m in _make_vm(rc2_root=self._tmp).load_rc2_missions()]
-        self.assertEqual(guids, sorted(guids))
-
-    def test_non_directory_entries_ignored(self):
-        _write(os.path.join(self._tmp, "stray_file.kmz"))
-        os.makedirs(os.path.join(self._tmp, "guid-real"))
-        missions = _make_vm(rc2_root=self._tmp).load_rc2_missions()
-        self.assertEqual(len(missions), 1)
-        self.assertEqual(missions[0].guid, "guid-real")
-
-    def test_only_first_kmz_in_slot_surfaced(self):
-        slot = os.path.join(self._tmp, "guid-multi")
-        os.makedirs(slot)
-        _write(os.path.join(slot, "alpha.kmz"))
-        _write(os.path.join(slot, "beta.kmz"))
-        missions = _make_vm(rc2_root=self._tmp).load_rc2_missions()
-        self.assertEqual(len(missions), 1)
-        self.assertIn(missions[0].kmz_name, ("alpha.kmz", "beta.kmz"))
-
-    def test_invalid_rc2_path_returns_empty_list(self):
-        self.assertEqual(_make_vm(rc2_root="/nonexistent/xyz").load_rc2_missions(), [])
+    def test_passes_configured_root_to_backend(self):
+        vm = _make_vm(rc2_root=SyncViewModel.DEFAULT_ADB_RC2_ROOT)
+        seen = []
+        vm._rc_backend.list_missions = lambda root: (seen.append(root) or ([], None))
+        vm.load_rc2_missions()
+        self.assertEqual(seen, [SyncViewModel.DEFAULT_ADB_RC2_ROOT])
 
     def test_blank_rc2_path_returns_empty_list(self):
-        self.assertEqual(_make_vm(rc2_root="").load_rc2_missions(), [])
+        vm = _make_vm(rc2_root="")
+        vm._rc_backend.list_missions = lambda root: ([], None)
+        self.assertEqual(vm.load_rc2_missions(), [])
 
 
 # ---------------------------------------------------------------------------
@@ -189,9 +233,9 @@ class TestMissionPreviewLookup(unittest.TestCase):
             if os.path.isfile(stale):
                 os.remove(stale)
 
-        def fake_list(path: str):
-            self.assertTrue(path.endswith("|map_preview"))
-            return True, [{"Name": "guid-123.jpg", "IsFolder": False}]
+        def fake_bulk(folder: str, timeout_seconds=None):
+            self.assertTrue(folder.endswith("|map_preview"))
+            return True, {"GUID-123": {"preview_name": "guid-123.jpg", "parent_name": "", "device_ts": ""}}
 
         def fake_copy(folder: str, filename: str, dest: str):
             self.assertTrue(folder.endswith("|map_preview"))
@@ -200,7 +244,7 @@ class TestMissionPreviewLookup(unittest.TestCase):
             _write_preview_jpeg(dest)
             return True, dest
 
-        vm._list_mtp_items = fake_list
+        vm._list_mtp_preview_bulk = fake_bulk
         vm._copy_file_from_mtp_folder = fake_copy
         preview_path = vm.get_mission_preview_path("guid-123")
         self.assertIsNotNone(preview_path)
@@ -213,25 +257,26 @@ class TestWaypointTextWrite(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.mkdtemp()
 
-    def test_write_temp_text_file_to_filesystem_waypoint(self):
-        vm = _make_vm(rc2_root=self._tmp)
+    def test_delegates_write_to_rc_backend(self):
+        vm = _make_vm(rc2_root=SyncViewModel.DEFAULT_MTP_RC2_ROOT)
+        captured = {}
+
+        def fake_write(root, name, content):
+            captured.update({"root": root, "name": name, "content": content})
+            return True, f"Wrote {name}"
+
+        vm._rc_backend.write_text_file = fake_write
         ok, msg = vm.write_waypoint_text_file(filename="temp.txt", content="hello waypoint")
         self.assertTrue(ok, msg)
-
-        out_path = os.path.join(self._tmp, "temp.txt")
-        self.assertTrue(os.path.isfile(out_path))
-        with open(out_path, "r", encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), "hello waypoint")
+        self.assertEqual(captured["name"], "temp.txt")
+        self.assertEqual(captured["content"], "hello waypoint")
 
     def test_mtp_preview_supports_nested_guid_folder(self):
         vm = _make_vm(rc2_root=SyncViewModel.DEFAULT_MTP_RC2_ROOT)
 
-        def fake_list(path: str):
-            if path.endswith("|map_preview"):
-                return True, [{"Name": "guid-456", "IsFolder": True}]
-            if path.endswith("|map_preview|guid-456"):
-                return True, [{"Name": "guid-456.jpg", "IsFolder": False}]
-            self.fail(f"Unexpected list path: {path}")
+        def fake_bulk(folder: str, timeout_seconds=None):
+            self.assertTrue(folder.endswith("|map_preview"))
+            return True, {"GUID-456": {"preview_name": "guid-456.jpg", "parent_name": "guid-456", "device_ts": ""}}
 
         def fake_copy(folder: str, filename: str, dest: str):
             self.assertTrue(folder.endswith("|map_preview|guid-456"))
@@ -239,7 +284,7 @@ class TestWaypointTextWrite(unittest.TestCase):
             _write_preview_jpeg(dest)
             return True, dest
 
-        vm._list_mtp_items = fake_list
+        vm._list_mtp_preview_bulk = fake_bulk
         vm._copy_file_from_mtp_folder = fake_copy
 
         preview_path = vm.get_mission_preview_path("guid-456")
@@ -260,7 +305,8 @@ class TestExecuteCopy(unittest.TestCase):
         self._pc  = os.path.join(self._tmp, "pc")
         os.makedirs(self._rc2)
         os.makedirs(self._pc)
-        self._vm = _make_vm(rc2_root=self._rc2, pc_root=self._pc)
+        self._vm = _make_vm(rc2_root=SyncViewModel.DEFAULT_ADB_RC2_ROOT, pc_root=self._pc)
+        _install_fs_backend(self._vm, self._rc2)
 
     def _slot(self, guid: str, kmz_name: str = "") -> RC2Mission:
         folder = os.path.join(self._rc2, guid)
@@ -710,7 +756,21 @@ class TestLoadRC2MissionsMtp(unittest.TestCase):
                 return True, []
             return False, "missing"
 
-        vm._list_mtp_items = fake_list
+        vm._rc_backend.list_missions = lambda root: (
+            [
+                RC2Mission(
+                    guid="guid-001",
+                    kmz_name="mission.kmz",
+                    full_folder_path=f"{root}|guid-001",
+                ),
+                RC2Mission(
+                    guid="guid-002",
+                    kmz_name="",
+                    full_folder_path=f"{root}|guid-002",
+                ),
+            ],
+            None,
+        )
         missions = vm.load_rc2_missions()
         self.assertEqual([mission.guid for mission in missions], ["guid-001", "guid-002"])
         self.assertEqual(missions[0].kmz_name, "mission.kmz")
@@ -736,16 +796,18 @@ class TestExecuteCopyMtp(unittest.TestCase):
         )
         captured = {}
 
-        def fake_copy(folder: str, source_path: str):
+        def fake_copy_device(folder: str, source_path: str, dest_filename: str):
             captured["folder"] = folder
             captured["source_path"] = source_path
-            return True, "existing.kmz"
+            captured["dest_filename"] = dest_filename
+            return True, "ok"
 
-        self._vm._copy_file_to_mtp_folder = fake_copy
+        self._vm._rc_backend.copy_file_to_device = fake_copy_device
+        self._vm._verify_mtp_copy_via_pull = lambda _mission, _source, _name: (True, "ok")
         ok, msg = self._vm.execute_copy(mission, KMZFile("source.kmz", src))
         self.assertTrue(ok)
         self.assertEqual(captured["folder"], mission.full_folder_path)
-        self.assertEqual(os.path.basename(captured["source_path"]), "existing.kmz")
+        self.assertEqual(captured["dest_filename"], "existing.kmz")
         self.assertIn("existing.kmz", msg)
 
     def test_copy_into_empty_mtp_slot_uses_guid_filename(self):
@@ -758,15 +820,72 @@ class TestExecuteCopyMtp(unittest.TestCase):
         )
         captured = {}
 
-        def fake_copy(folder: str, source_path: str):
+        def fake_copy_device(folder: str, source_path: str, dest_filename: str):
             captured["folder"] = folder
             captured["source_path"] = source_path
-            return True, "guid-002.kmz"
+            captured["dest_filename"] = dest_filename
+            return True, "ok"
 
-        self._vm._copy_file_to_mtp_folder = fake_copy
+        self._vm._rc_backend.copy_file_to_device = fake_copy_device
+        self._vm._verify_mtp_copy_via_pull = lambda _mission, _source, _name: (True, "ok")
         ok, _ = self._vm.execute_copy(mission, KMZFile("source.kmz", src))
         self.assertTrue(ok)
-        self.assertEqual(os.path.basename(captured["source_path"]), "guid-002.kmz")
+        self.assertEqual(captured["dest_filename"], "guid-002.kmz")
+
+    def test_copy_mtp_fast_mode_does_not_block_on_stale_read(self):
+        src = os.path.join(self._pc, "source.kmz")
+        _write(src, b"DATA")
+        mission = RC2Mission(
+            guid="guid-003",
+            kmz_name="existing.kmz",
+            full_folder_path=f"{SyncViewModel.DEFAULT_MTP_RC2_ROOT}|guid-003",
+        )
+
+        calls = {"copy": 0, "read": 0}
+
+        def fake_copy_device(_folder: str, _source_path: str, _dest_filename: str):
+            calls["copy"] += 1
+            return True, "ok"
+
+        def fake_read(_mission: RC2Mission, _filename: str):
+            calls["read"] += 1
+            if calls["read"] == 1:
+                return True, b"XX"
+            return True, b"DATA"
+
+        self._vm._rc_backend.copy_file_to_device = fake_copy_device
+        self._vm._verify_mtp_copy_via_pull = lambda _mission, _source, _name: (True, "ok")
+        self._vm._read_slot_file_bytes = fake_read
+
+        ok, msg = self._vm.execute_copy(mission, KMZFile("source.kmz", src))
+
+        self.assertTrue(ok)
+        self.assertIn("saved as", msg)
+        self.assertEqual(calls["copy"], 1)
+        self.assertEqual(calls["read"], 0)
+
+    def test_copy_into_mtp_slot_continues_when_delete_preparation_fails(self):
+        src = os.path.join(self._pc, "source.kmz")
+        _write(src, b"DATA")
+        mission = RC2Mission(
+            guid="guid-004",
+            kmz_name="existing.kmz",
+            full_folder_path=f"{SyncViewModel.DEFAULT_MTP_RC2_ROOT}|guid-004",
+        )
+
+        calls = {"copy": 0}
+
+        def fake_copy_device(_folder: str, _source_path: str, _dest_filename: str):
+            calls["copy"] += 1
+            return True, "ok"
+
+        self._vm._rc_backend.copy_file_to_device = fake_copy_device
+        self._vm._verify_mtp_copy_via_pull = lambda _mission, _source, _name: (True, "ok")
+
+        ok, msg = self._vm.execute_copy(mission, KMZFile("source.kmz", src))
+
+        self.assertTrue(ok)
+        self.assertEqual(calls["copy"], 1)
 
 
 class TestCopyMapping(unittest.TestCase):
@@ -840,7 +959,8 @@ class TestInspectMissionStorage(unittest.TestCase):
         return RC2Mission("guid-inspect", "mission.kmz", slot_dir)
 
     def test_quick_inspect_skips_deep_probes_and_reports_summary(self):
-        vm = _make_vm(rc2_root=self._tmp)
+        vm = _make_vm(rc2_root=SyncViewModel.DEFAULT_ADB_RC2_ROOT)
+        _install_fs_backend(vm, self._tmp)
         mission = self._mission_with_kmz()
 
         def _should_not_run(*_args, **_kwargs):
@@ -856,11 +976,18 @@ class TestInspectMissionStorage(unittest.TestCase):
         self.assertIn("external to the KMZ", details)
 
     def test_deep_inspect_reports_binary_candidates(self):
-        vm = _make_vm(rc2_root=self._tmp)
+        vm = _make_vm(rc2_root=SyncViewModel.DEFAULT_ADB_RC2_ROOT)
+        _install_fs_backend(vm, self._tmp)
         mission = self._mission_with_kmz()
 
-        with open(os.path.join(self._tmp, "DJI_MissionIndex.sqlite"), "wb") as fh:
-            fh.write(b"sqlite")
+        vm._inspect_binary_metadata_candidates = lambda m, k: [
+            "Binary metadata/index search:",
+            "Candidate folders: 1",
+            "- /fake: DJI_MissionIndex.sqlite [Unknown]",
+            "Best candidate: /fake | DJI_MissionIndex.sqlite [Unknown]",
+            "Potential binary metadata/index files:",
+            "  * /fake | DJI_MissionIndex.sqlite [Unknown]",
+        ]
 
         ok, details = vm.inspect_mission_storage(mission, deep=True)
 

@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v1.10"
+_APP_VERSION = "v2.0"
 
 
 try:
@@ -88,6 +88,9 @@ class MainView:
         self._rc2_monitor_thread: threading.Thread | None = None
         self._rc2_scan_lock = threading.Lock()
         self._busy = False
+        self._busy_popup: tk.Toplevel | None = None
+        self._busy_popup_message_var: tk.StringVar | None = None
+        self._busy_popup_progress: ttk.Progressbar | None = None
         self._copy_in_progress = False
         self._inspect_in_progress = False
         self._delete_in_progress = False
@@ -128,6 +131,7 @@ class MainView:
         self._flush_path_entries()
         if self._preview_popup is not None and self._preview_popup.winfo_exists():
             self._preview_popup.destroy()
+        self._hide_busy_popup()
         self._root.destroy()
 
     def _start_rc2_connection_monitor(self) -> None:
@@ -1103,23 +1107,21 @@ class MainView:
 
         if missions:
             self._log("Loading RC-2 mission preview thumbnails...", level="DEBUG")
-
-        for mission in missions:
-            data: bytes | None = None
-            path = self._vm.get_mission_preview_path(
-                mission.guid,
+            preview_paths = self._vm.get_all_mission_preview_paths(
+                missions,
                 copy_timeout_seconds=preview_copy_timeout_seconds,
                 list_timeout_seconds=preview_copy_timeout_seconds,
             )
-
-            if path and os.path.isfile(path):
-                try:
-                    with open(path, "rb") as fh:
-                        data = fh.read()
-                except OSError:
-                    data = None
-
-            preview_data[mission.guid] = data
+            for mission in missions:
+                path = preview_paths.get(mission.guid)
+                data: bytes | None = None
+                if path and os.path.isfile(path):
+                    try:
+                        with open(path, "rb") as fh:
+                            data = fh.read()
+                    except OSError:
+                        data = None
+                preview_data[mission.guid] = data
 
         return missions, rc2_error, preview_data
 
@@ -1392,12 +1394,24 @@ class MainView:
                 parent_id = folder_id
 
             kmz_name = parts[-1]
-            item_id = self._pc_tree.insert(
-                parent_id if parent_id else "",
-                tk.END,
-                values=(kmz_name,),
-                tags=("file",),
-            )
+            if parent_id:
+                # File inside a subfolder — show name in the filename column.
+                item_id = self._pc_tree.insert(
+                    parent_id,
+                    tk.END,
+                    values=(kmz_name,),
+                    tags=("file",),
+                )
+            else:
+                # Root-level file — show name in the tree (#0) column so it
+                # aligns visually with top-level folder nodes.
+                item_id = self._pc_tree.insert(
+                    "",
+                    tk.END,
+                    text=kmz_name,
+                    values=("",),
+                    tags=("file",),
+                )
             self._pc_files_by_item[item_id] = f
         self._log(f"PC KMZ files loaded: {len(files)}")
         if last_error:
@@ -1540,6 +1554,80 @@ class MainView:
     def _set_busy(self, busy: bool, message: str) -> None:
         self._busy = busy
         self._busy_var.set(message if busy else "")
+        if busy:
+            self._show_busy_popup(message)
+        else:
+            self._hide_busy_popup()
+
+    def _show_busy_popup(self, message: str) -> None:
+        popup = self._busy_popup
+        if popup is not None and popup.winfo_exists():
+            if self._busy_popup_message_var is not None:
+                self._busy_popup_message_var.set(message or "Working...")
+            popup.deiconify()
+            popup.lift()
+            return
+
+        popup = tk.Toplevel(self._root)
+        self._busy_popup = popup
+        popup.title("Progress")
+        popup.configure(bg=_PANEL_BG)
+        popup.resizable(False, False)
+        popup.transient(self._root)
+        popup.grab_set()
+        popup.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        frame = tk.Frame(popup, bg=_PANEL_BG)
+        frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
+
+        self._busy_popup_message_var = tk.StringVar(value=message or "Working...")
+        tk.Label(
+            frame,
+            textvariable=self._busy_popup_message_var,
+            bg=_PANEL_BG,
+            fg=_TEXT,
+            font=_FONT_BODY,
+            anchor=tk.W,
+            justify=tk.LEFT,
+            width=38,
+        ).pack(fill=tk.X, pady=(0, 10))
+
+        progress = ttk.Progressbar(frame, mode="indeterminate", length=320)
+        progress.pack(fill=tk.X)
+        progress.start(12)
+        self._busy_popup_progress = progress
+
+        popup.update_idletasks()
+        root_x = self._root.winfo_rootx()
+        root_y = self._root.winfo_rooty()
+        root_w = self._root.winfo_width()
+        root_h = self._root.winfo_height()
+        popup_w = popup.winfo_width()
+        popup_h = popup.winfo_height()
+        x = root_x + max((root_w - popup_w) // 2, 0)
+        y = root_y + max((root_h - popup_h) // 2, 0)
+        popup.geometry(f"+{x}+{y}")
+        popup.lift()
+
+    def _hide_busy_popup(self) -> None:
+        progress = self._busy_popup_progress
+        if progress is not None:
+            try:
+                progress.stop()
+            except tk.TclError:
+                pass
+
+        popup = self._busy_popup
+        if popup is not None and popup.winfo_exists():
+            try:
+                popup.grab_release()
+            except tk.TclError:
+                pass
+            popup.destroy()
+
+        self._busy_popup = None
+        self._busy_popup_message_var = None
+        self._busy_popup_progress = None
 
     def _preview_image_for_mission(self, guid: str, image_data: bytes | None) -> tk.PhotoImage:
         if not image_data:

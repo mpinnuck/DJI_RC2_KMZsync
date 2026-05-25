@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 import zipfile
 from datetime import datetime
@@ -18,6 +19,7 @@ try:
 except ImportError:
     Image = None
 
+from backends.backend_factory import BackendFactory, UnsupportedBackendError
 from config.config_manager import ConfigManager, get_runtime_base_dir
 from model.kmz_file import KMZFile
 from model.rc2_mission import RC2Mission
@@ -34,9 +36,14 @@ class SyncViewModel:
         "mtp:DJI RC 2|Internal shared storage|Android|data|dji.go.v5|files|waypoint"
     )
     POWERSHELL_TIMEOUT_SECONDS = 30
-    MTP_LIST_TIMEOUT_SECONDS = 120
-    MTP_COPY_TIMEOUT_SECONDS = 30
-    MTP_WRITE_TIMEOUT_SECONDS = 30
+    MTP_LIST_TIMEOUT_SECONDS = 30
+    MTP_COPY_TIMEOUT_SECONDS = 10
+    MTP_WRITE_TIMEOUT_SECONDS = 10
+    MTP_VERIFY_TIMEOUT_SECONDS = 5
+    MTP_OVERWRITE_TIMEOUT_SECONDS = 15
+    MTP_COPY_SETTLE_SECONDS = 0.3
+    MTP_SIZE_TOLERANCE_PERCENT = 10.0
+    MTP_SIZE_TOLERANCE_BYTES = 4096
     _RC2_NON_MISSION_FOLDERS = {"capability", "map_preview"}
     COPY_MAP_FILE = "kmz_copy_map.json"
 
@@ -44,7 +51,11 @@ class SyncViewModel:
         self._config = config
         self._last_error: str | None = None
         self._mtp_preview_items_cache: dict[str, List[dict[str, Any]]] = {}
+        self._preview_timestamp_cache: dict[str, str] = {}  # guid → device ModifyDate string
+        self._preview_timestamps_loaded: bool = False
         self._mtp_operation_lock = threading.Lock()
+        self._rc_backend = self._create_rc_backend(config.rc2_folder)
+        self._pc_backend = BackendFactory.create_pc(config)
         if copy_map_path:
             self._copy_map_path = copy_map_path
         else:
@@ -72,6 +83,19 @@ class SyncViewModel:
         if os.path.isfile(self._copy_map_path):
             return
         self._save_copy_map(self._default_copy_map_payload())
+
+    def _create_rc_backend(self, path: str):
+        """
+        Build the RC backend for *path*, falling back to a disconnected ADB
+        backend when the path uses no recognised protocol prefix.
+        """
+        try:
+            return BackendFactory.create_rc(path, self._config)
+        except UnsupportedBackendError:
+            # Path is not a recognised device protocol (e.g. a bare filesystem
+            # path entered before the adb:/mtp: prefix was configured).  Keep a
+            # disconnected ADB backend so connectivity checks return False cleanly.
+            return BackendFactory.create_rc("", self._config)
 
     def _load_copy_map(self) -> dict[str, Any]:
         if not os.path.isfile(self._copy_map_path):
@@ -185,20 +209,8 @@ class SyncViewModel:
         return raw.replace("\\", "/")
 
     @staticmethod
-    def _adb_remote_join(root: str, name: str) -> str:
-        return f"{root.rstrip('/')}/{name}"
-
-    @staticmethod
     def _format_display_datetime(dt: datetime) -> str:
         return dt.strftime("%d/%m/%Y %H:%M:%S")
-
-    @classmethod
-    def _format_local_mtime(cls, path: str) -> str:
-        try:
-            ts = os.path.getmtime(path)
-            return cls._format_display_datetime(datetime.fromtimestamp(ts))
-        except OSError:
-            return ""
 
     @classmethod
     def _normalize_mtp_modify_date(cls, raw_value: str) -> str:
@@ -453,176 +465,21 @@ foreach ($segment in $segments) {{
         mtp_path: str,
         timeout_seconds: int | None = None,
     ) -> Tuple[bool, List[dict[str, Any]] | str]:
-        script = self._mtp_script(
-            mtp_path,
-            """
-$modifiedIndex = $null
-for ($i = 0; $i -lt 320; $i++) {
-    $label = $current.GetDetailsOf($null, $i)
-    if (-not $label) {
-        continue
-    }
-    $normalized = ($label -as [string]).Trim().ToLowerInvariant()
-    if ($normalized -in @('date modified', 'modified', 'modification date', 'date de modification')) {
-        $modifiedIndex = $i
-        break
-    }
-}
-
-$items = @(
-    $current.Items() | Select-Object Name,
-        @{Name='IsFolder'; Expression={ [bool]$_.IsFolder }},
-        @{Name='ModifyDate'; Expression={ [string]$_.ModifyDate }},
-        @{Name='ModifyDateDetail'; Expression={ if ($modifiedIndex -ne $null) { [string]$current.GetDetailsOf($_, $modifiedIndex) } else { '' } }}
-)
-if ($items) {
-    $items | ConvertTo-Json -Compress
-}
-""",
-        )
-        return self._run_mtp_powershell_json(
-            script,
-            timeout_seconds=timeout_seconds or self.MTP_LIST_TIMEOUT_SECONDS,
+        # Delegated to WindowsMTPBackend. Note: the backend omits the 'Size'
+        # field (DJI MTP always reports size=0 for all files anyway).
+        return self._rc_backend._list_mtp_items(  # type: ignore[attr-defined]
+            mtp_path, timeout_seconds=timeout_seconds or self.MTP_LIST_TIMEOUT_SECONDS
         )
 
     def _list_mtp_missions_bulk(self, mtp_path: str) -> Tuple[bool, List[dict[str, Any]] | str]:
-        script = self._mtp_script(
-            mtp_path,
-            """
-$result = @()
-
-$slotFolders = @(
-    $current.Items() |
-        Where-Object {
-            $_.IsFolder -and
-            $_.Name -ne 'capability' -and
-            $_.Name -ne 'map_preview'
-        } |
-        Sort-Object Name
-)
-
-foreach ($slot in $slotFolders) {
-    $slotFolder = $slot.GetFolder
-    if (-not $slotFolder) {
-        continue
-    }
-
-    $modifiedIndex = $null
-    for ($i = 0; $i -lt 320; $i++) {
-        $label = $slotFolder.GetDetailsOf($null, $i)
-        if (-not $label) {
-            continue
-        }
-        $normalized = ($label -as [string]).Trim().ToLowerInvariant()
-        if ($normalized -in @('date modified', 'modified', 'modification date', 'date de modification')) {
-            $modifiedIndex = $i
-            break
-        }
-    }
-
-    $kmzItems = @(
-        $slotFolder.Items() |
-            Where-Object {
-                (-not $_.IsFolder) -and
-                ($_.Name -match '(?i)\\.kmz$')
-            } |
-            Sort-Object Name
-    )
-
-    $kmzName = ''
-    $modifyDate = ''
-    $modifyDateDetail = ''
-    if ($kmzItems.Count -gt 0) {
-        $first = $kmzItems[0]
-        $kmzName = [string]$first.Name
-        $modifyDate = [string]$first.ModifyDate
-        if ($modifiedIndex -ne $null) {
-            $modifyDateDetail = [string]$slotFolder.GetDetailsOf($first, $modifiedIndex)
-        }
-    }
-
-    $result += [PSCustomObject]@{
-        Name = [string]$slot.Name
-        KMZName = $kmzName
-        ModifyDate = $modifyDate
-        ModifyDateDetail = $modifyDateDetail
-    }
-}
-
-if ($result) {
-    $result | ConvertTo-Json -Compress
-}
-""",
-        )
-        return self._run_mtp_powershell_json(
-            script,
-            timeout_seconds=self.MTP_LIST_TIMEOUT_SECONDS,
-        )
+        return self._rc_backend._list_missions_bulk(mtp_path)  # type: ignore[attr-defined]
 
     def _copy_file_to_mtp_folder(self, mtp_folder: str, local_source_path: str) -> Tuple[bool, str]:
-        script = self._mtp_script(
-            mtp_folder,
-            f"""
-$sourcePath = {self._ps_single_quote(local_source_path)}
-if (-not (Test-Path -LiteralPath $sourcePath)) {{
-    throw "Source file not found: $sourcePath"
-}}
-
-$sourceName = [System.IO.Path]::GetFileName($sourcePath)
-$current.CopyHere($sourcePath, 0x614)
-
-$copyDeadline = (Get-Date).AddSeconds(30)
-$copied = $null
-do {{
-    $copied = $current.Items() | Where-Object {{ $_.Name -eq $sourceName }} | Select-Object -First 1
-    if ($copied) {{
-        break
-    }}
-    [System.Threading.Thread]::Sleep(200)
-}} while ((Get-Date) -lt $copyDeadline)
-
-if (-not $copied) {{
-    throw "MTP copy did not complete for $sourceName"
-}}
-
-Write-Output $sourceName
-""",
-        )
-        return self._run_mtp_powershell(
-            script,
-            timeout_seconds=self.MTP_COPY_TIMEOUT_SECONDS,
-        )
+        dest_filename = os.path.basename(local_source_path)
+        return self._rc_backend.copy_file_to_device(mtp_folder, local_source_path, dest_filename)
 
     def _create_mtp_slot_folder(self, mtp_root: str, guid: str) -> Tuple[bool, str]:
-        script = self._mtp_script(
-            mtp_root,
-            f"""
-$folderName = {self._ps_single_quote(guid)}
-$existing = $current.Items() | Where-Object {{ $_.Name -eq $folderName -and $_.IsFolder }} | Select-Object -First 1
-if (-not $existing) {{
-    $current.NewFolder($folderName)
-}}
-
-$deadline = (Get-Date).AddSeconds(10)
-do {{
-    $existing = $current.Items() | Where-Object {{ $_.Name -eq $folderName -and $_.IsFolder }} | Select-Object -First 1
-    if ($existing) {{
-        break
-    }}
-    [System.Threading.Thread]::Sleep(200)
-}} while ((Get-Date) -lt $deadline)
-
-if (-not $existing) {{
-    throw "MTP slot folder creation failed: $folderName"
-}}
-
-Write-Output $folderName
-""",
-        )
-        return self._run_mtp_powershell(
-            script,
-            timeout_seconds=self.MTP_COPY_TIMEOUT_SECONDS,
-        )
+        return self._rc_backend.create_slot_folder(mtp_root, guid)
 
     def _copy_file_from_mtp_folder(
         self,
@@ -631,62 +488,73 @@ Write-Output $folderName
         local_dest_path: str,
         timeout_seconds: int | None = None,
     ) -> Tuple[bool, str]:
+        return self._rc_backend.copy_file_from_device(
+            mtp_folder, filename, local_dest_path,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _delete_file_from_mtp_folder(self, mtp_folder: str, filename: str) -> Tuple[bool, str]:
         script = self._mtp_script(
             mtp_folder,
             f"""
 $filename = {self._ps_single_quote(filename)}
-$destPath = {self._ps_single_quote(local_dest_path)}
-$destDir = Split-Path -Parent $destPath
-
-if (-not (Test-Path -LiteralPath $destDir)) {{
-    New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-}}
-
-$item = $current.Items() | Where-Object {{ $_.Name -eq $filename }} | Select-Object -First 1
+$item = $current.Items() | Where-Object {{ $_.Name -eq $filename -and -not $_.IsFolder }} | Select-Object -First 1
 if (-not $item) {{
-    throw "MTP file not found: $filename"
+    Write-Output "NOT_FOUND"
+    return
 }}
 
-if (Test-Path -LiteralPath $destPath) {{
-    Remove-Item -LiteralPath $destPath -Force
+try {{
+    $item.InvokeVerb('delete')
+}} catch {{
+    throw "Failed to delete MTP file: $filename"
 }}
 
-$stageDir = Join-Path $destDir ([Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
-
-$shell = New-Object -ComObject Shell.Application
-$destination = $shell.Namespace($stageDir)
-if (-not $destination) {{
-    throw "Local staging folder unavailable: $stageDir"
-}}
-
-$destination.CopyHere($item, 0x614)
-
-$copyDeadline = (Get-Date).AddSeconds(15)
-$stagedPath = Join-Path $stageDir $filename
+$deadline = (Get-Date).AddSeconds(8)
 do {{
-    if (Test-Path -LiteralPath $stagedPath) {{
+    $remaining = $current.Items() | Where-Object {{ $_.Name -eq $filename -and -not $_.IsFolder }} | Select-Object -First 1
+    if (-not $remaining) {{
         break
     }}
     [System.Threading.Thread]::Sleep(200)
-}} while ((Get-Date) -lt $copyDeadline)
+}} while ((Get-Date) -lt $deadline)
 
-if (-not (Test-Path -LiteralPath $stagedPath)) {{
-    throw "MTP preview copy did not complete for $filename"
+$remaining = $current.Items() | Where-Object {{ $_.Name -eq $filename -and -not $_.IsFolder }} | Select-Object -First 1
+if ($remaining) {{
+    throw "MTP delete did not complete for $filename"
 }}
 
-Move-Item -LiteralPath $stagedPath -Destination $destPath -Force
-
-if (Test-Path -LiteralPath $stageDir) {{
-    Remove-Item -LiteralPath $stageDir -Recurse -Force
-}}
-
-Write-Output $destPath
+Write-Output "DELETED"
 """,
         )
         return self._run_mtp_powershell(
             script,
-            timeout_seconds=timeout_seconds or self.MTP_COPY_TIMEOUT_SECONDS,
+            timeout_seconds=self.MTP_COPY_TIMEOUT_SECONDS,
+        )
+
+    def _delete_file_from_mtp_folder_fast(self, mtp_folder: str, filename: str) -> Tuple[bool, str]:
+        script = self._mtp_script(
+            mtp_folder,
+            f"""
+$filename = {self._ps_single_quote(filename)}
+$item = $current.Items() | Where-Object {{ $_.Name -eq $filename -and -not $_.IsFolder }} | Select-Object -First 1
+if (-not $item) {{
+    Write-Output "NOT_FOUND"
+    return
+}}
+
+try {{
+    $item.InvokeVerb('delete')
+}} catch {{
+    throw "Failed to delete MTP file: $filename"
+}}
+
+Write-Output "DELETE_REQUESTED"
+""",
+        )
+        return self._run_mtp_powershell(
+            script,
+            timeout_seconds=10,
         )
 
     @staticmethod
@@ -749,10 +617,151 @@ Write-Output $destPath
         root_hash = hashlib.sha1(root.encode("utf-8", errors="ignore")).hexdigest()[:12]
         return os.path.join(cache_root, f"{root_hash}-{guid}")
 
+    def _preview_timestamps_path(self, root: str) -> str:
+        cache_root = os.path.join(tempfile.gettempdir(), "djirc2kmzsync-previews")
+        root_hash = hashlib.sha1(root.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        return os.path.join(cache_root, f"{root_hash}-timestamps.json")
+
+    def _load_preview_timestamps(self, root: str) -> None:
+        """Load the persisted timestamp map from disk once per session."""
+        if self._preview_timestamps_loaded:
+            return
+        self._preview_timestamps_loaded = True
+        path = self._preview_timestamps_path(root)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                self._preview_timestamp_cache = {str(k): str(v) for k, v in data.items()}
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    def _save_preview_timestamps(self, root: str) -> None:
+        """Persist the timestamp map atomically so it survives app restarts."""
+        path = self._preview_timestamps_path(root)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self._preview_timestamp_cache, fh)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
+    def clear_mtp_listings_cache(self) -> None:
+        """Clear the in-memory MTP folder-listing cache."""
+        self._mtp_preview_items_cache.clear()
+
+    def _list_mtp_preview_bulk(
+        self,
+        preview_folder: str,
+        timeout_seconds: int | None = None,
+    ) -> Tuple[bool, dict[str, dict[str, str]]]:
+        """Single PowerShell process that lists map_preview/ and all its
+        one-level-deep subfolders, returning
+        {GUID_UPPER: {preview_name, parent_name, device_ts}}.
+        Always performs a fresh MTP call — callers should invoke this
+        once and reuse the result across missions."""
+        script = self._mtp_script(
+            preview_folder,
+            r"""
+# Discover the 'date modified' column index once for the top folder.
+$modifiedIndex = $null
+for ($i = 0; $i -lt 320; $i++) {
+    $label = $current.GetDetailsOf($null, $i)
+    if (-not $label) { continue }
+    $normalized = ($label -as [string]).Trim().ToLowerInvariant()
+    if ($normalized -in @('date modified','modified','modification date','date de modification')) {
+        $modifiedIndex = $i
+        break
+    }
+}
+
+$result = [System.Collections.Generic.List[PSObject]]::new()
+$topItems = @($current.Items())
+foreach ($item in $topItems) {
+    if (-not $item.IsFolder) {
+        $ts = if ($modifiedIndex -ne $null) { [string]$current.GetDetailsOf($item, $modifiedIndex) } else { '' }
+        $result.Add([PSCustomObject]@{
+            ParentName      = ''
+            Name            = [string]$item.Name
+            ModifyDateDetail = $ts
+            ModifyDate      = [string]$item.ModifyDate
+        })
+    } else {
+        $subFolder = $item.GetFolder
+        if (-not $subFolder) { continue }
+        try {
+            $subItems = @($subFolder.Items())
+        } catch { continue }
+        foreach ($subItem in $subItems) {
+            if (-not $subItem.IsFolder) {
+                $ts = ''
+                if ($modifiedIndex -ne $null) {
+                    try { $ts = [string]$subFolder.GetDetailsOf($subItem, $modifiedIndex) } catch {}
+                }
+                if (-not $ts) { $ts = [string]$subItem.ModifyDate }
+                $result.Add([PSCustomObject]@{
+                    ParentName      = [string]$item.Name
+                    Name            = [string]$subItem.Name
+                    ModifyDateDetail = $ts
+                    ModifyDate      = [string]$subItem.ModifyDate
+                })
+            }
+        }
+    }
+}
+if ($result.Count -gt 0) { @($result) | ConvertTo-Json -Compress }
+""",
+        )
+        ok, result = self._run_mtp_powershell_json(
+            script, timeout_seconds=timeout_seconds or self.MTP_LIST_TIMEOUT_SECONDS
+        )
+        if not ok:
+            return False, {}
+
+        raw_items = (
+            result if isinstance(result, list)
+            else ([result] if isinstance(result, dict) else [])
+        )
+        preferred = {".jpg", ".jpeg", ".png"}
+        info: dict[str, dict[str, str]] = {}
+        for item in raw_items:
+            name = str(item.get("Name") or "").strip()
+            parent = str(item.get("ParentName") or "").strip()
+            if not name:
+                continue
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in preferred:
+                continue
+            guid_key = os.path.splitext(name)[0].upper()
+            if guid_key and guid_key not in info:
+                device_ts = (
+                    str(item.get("ModifyDateDetail") or "").strip()
+                    or str(item.get("ModifyDate") or "").strip()
+                )
+                info[guid_key] = {
+                    "preview_name": name,
+                    "parent_name": parent,
+                    "device_ts": device_ts,
+                }
+
+        return True, info
+
     def clear_stale_preview_cache(self) -> None:
+        self._mtp_preview_items_cache.clear()
+        self._preview_timestamp_cache.clear()
+        self._preview_timestamps_loaded = False
+
         root = (self._config.rc2_folder or "").strip()
         if not root:
             return
+
+        # Delete the persisted timestamps file so stale entries don't survive.
+        try:
+            os.remove(self._preview_timestamps_path(root))
+        except OSError:
+            pass
 
         cache_base = self._preview_cache_path(root, "")
         cache_root = os.path.dirname(cache_base)
@@ -774,6 +783,24 @@ Write-Output $destPath
                 os.remove(full_path)
             except OSError:
                 pass
+
+    def clear_preview_cache_for_guid(self, guid: str) -> None:
+        """Delete the locally-cached preview file and stored timestamp for
+        *guid* so the next refresh re-fetches the image from the device."""
+        root = (self._config.rc2_folder or "").strip()
+        if not root or not guid:
+            return
+        self._preview_timestamp_cache.pop(guid, None)
+        self._save_preview_timestamps(root)
+        cache_base = self._preview_cache_path(root, guid)
+        for candidate in self._preview_name_candidates(guid):
+            ext = os.path.splitext(candidate)[1].lower()
+            cache_path = f"{cache_base}{ext}"
+            if os.path.exists(cache_path):
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
 
     @staticmethod
     def _cache_temp_copy_path(cache_path: str) -> str:
@@ -860,56 +887,53 @@ Write-Output $destPath
 
         if self._is_mtp_path(root):
             cache_base = self._preview_cache_path(root, guid)
-            cached = self._find_usable_cached_preview(cache_base, guid)
-            if cached:
-                return cached
 
-            if not allow_live_fetch:
-                return None
+            # Load persisted timestamps once per session so restarts are fast.
+            self._load_preview_timestamps(root)
 
+            # One bulk PowerShell call lists map_preview/ AND all its
+            # subfolders, covering all missions.  Shared across all missions
+            # in this refresh cycle via _mtp_preview_bulk_cache.
             preview_folder = self._mtp_join(root, "map_preview")
-            ok_items, item_result = self._list_mtp_items_cached(
+            ok_bulk, bulk_info = self._list_mtp_preview_bulk(
                 preview_folder,
                 timeout_seconds=list_timeout_seconds,
             )
-            if not ok_items:
-                return None
 
-            items = item_result if isinstance(item_result, list) else []
-            preview_name = self._choose_preview_name_from_items(guid, items)
-            source_folder = preview_folder
+            # Listing failed — fall back to disk cache without timestamp check.
+            if not ok_bulk:
+                return self._find_usable_cached_preview(cache_base, guid)
 
-            if not preview_name:
-                folder_names = [
-                    str(item.get("Name") or "").strip()
-                    for item in items
-                    if bool(item.get("IsFolder"))
-                ]
-                nested_folder = self._choose_preview_folder_name(guid, folder_names)
-                if nested_folder:
-                    source_folder = self._mtp_join(preview_folder, nested_folder)
-                    ok_nested, nested_result = self._list_mtp_items_cached(
-                        source_folder,
-                        timeout_seconds=list_timeout_seconds,
-                    )
-                    if ok_nested:
-                        nested_items = nested_result if isinstance(nested_result, list) else []
-                        preview_name = self._choose_preview_name_from_items(guid, nested_items)
+            entry = bulk_info.get(guid.upper())
 
-            # Some MTP providers return unreliable IsFolder metadata; probe
-            # map_preview|<guid> directly as a fallback for nested previews.
-            if not preview_name:
-                source_folder = self._mtp_join(preview_folder, guid)
-                ok_nested, nested_result = self._list_mtp_items_cached(
-                    source_folder,
-                    timeout_seconds=list_timeout_seconds,
-                )
-                if ok_nested:
-                    nested_items = nested_result if isinstance(nested_result, list) else []
-                    preview_name = self._choose_preview_name_from_items(guid, nested_items)
+            # No preview on device; return disk cache if we have one.
+            if not entry:
+                return self._find_usable_cached_preview(cache_base, guid)
 
-            if not preview_name:
-                return None
+            preview_name = entry["preview_name"]
+            parent_name = entry["parent_name"]
+            device_ts = entry["device_ts"]
+            source_folder = (
+                self._mtp_join(preview_folder, parent_name)
+                if parent_name else preview_folder
+            )
+
+            # Return disk cache immediately when timestamp is unchanged (or
+            # unavailable — e.g. device returns empty string for this field).
+            cached = self._find_usable_cached_preview(cache_base, guid)
+            cached_ts = self._preview_timestamp_cache.get(guid, "")
+            if cached and (not device_ts or device_ts == cached_ts):
+                return cached
+
+            if not allow_live_fetch:
+                return cached  # Stale but can't re-fetch; return what we have.
+
+            # Cache is absent or device timestamp is newer; copy fresh from device.
+            if cached:
+                try:
+                    os.remove(cached)
+                except OSError:
+                    pass
 
             ext = os.path.splitext(preview_name)[1].lower() or ".jpg"
             cache_path = f"{cache_base}{ext}"
@@ -925,6 +949,9 @@ Write-Output $destPath
                 )
             if ok and self._is_usable_preview_file(temp_copy):
                 self._promote_cache_copy(temp_copy, cache_path)
+                if device_ts:
+                    self._preview_timestamp_cache[guid] = device_ts
+                    self._save_preview_timestamps(root)
                 return cache_path
             if os.path.exists(temp_copy):
                 try:
@@ -934,79 +961,12 @@ Write-Output $destPath
             return None
 
         if self._is_adb_path(root):
-            cache_base = self._preview_cache_path(root, guid)
-            cached = self._find_usable_cached_preview(cache_base, guid)
-            if cached:
-                return cached
-
-            if not allow_live_fetch:
-                return None
-
-            remote_root = self._adb_remote_root(root)
-            preview_dir = self._adb_remote_join(remote_root, "map_preview")
-            ok_ls, out_ls = self._run_adb(["shell", "ls", "-1", preview_dir])
-            if not ok_ls:
-                return None
-
-            names = [line.strip() for line in out_ls.splitlines() if line.strip()]
-            preview_name: str | None = None
-            source_dir = preview_dir
-            for suffix in (".jpg", ".jpeg", ".png"):
-                target = f"{guid.lower()}{suffix}"
-                for name in names:
-                    if name.lower() == target:
-                        preview_name = name
-                        break
-                if preview_name:
-                    break
-
-            if not preview_name:
-                nested_folder = self._choose_preview_folder_name(guid, names)
-                if nested_folder:
-                    source_dir = self._adb_remote_join(preview_dir, nested_folder)
-                    ok_nested_ls, out_nested_ls = self._run_adb(["shell", "ls", "-1", source_dir])
-                    if ok_nested_ls:
-                        nested_names = [line.strip() for line in out_nested_ls.splitlines() if line.strip()]
-                        for suffix in (".jpg", ".jpeg", ".png"):
-                            target = f"{guid.lower()}{suffix}"
-                            for name in nested_names:
-                                if name.lower() == target:
-                                    preview_name = name
-                                    break
-                            if preview_name:
-                                break
-
-            if not preview_name:
-                source_dir = self._adb_remote_join(preview_dir, guid)
-                ok_nested_ls, out_nested_ls = self._run_adb(["shell", "ls", "-1", source_dir])
-                if ok_nested_ls:
-                    nested_names = [line.strip() for line in out_nested_ls.splitlines() if line.strip()]
-                    for suffix in (".jpg", ".jpeg", ".png"):
-                        target = f"{guid.lower()}{suffix}"
-                        for name in nested_names:
-                            if name.lower() == target:
-                                preview_name = name
-                                break
-                        if preview_name:
-                            break
-
-            if not preview_name:
-                return None
-
-            ext = os.path.splitext(preview_name)[1].lower() or ".jpg"
-            cache_path = f"{cache_base}{ext}"
-            remote_preview = self._adb_remote_join(source_dir, preview_name)
-            temp_copy = self._cache_temp_copy_path(cache_path)
-            ok, _ = self._run_adb(["pull", remote_preview, temp_copy])
-            if ok and self._is_usable_preview_file(temp_copy):
-                self._promote_cache_copy(temp_copy, cache_path)
-                return cache_path
-            if os.path.exists(temp_copy):
-                try:
-                    os.remove(temp_copy)
-                except OSError:
-                    pass
-            return None
+            return self._rc_backend.get_preview_path(
+                root, guid,
+                copy_timeout_seconds=copy_timeout_seconds,
+                list_timeout_seconds=list_timeout_seconds,
+                allow_live_fetch=allow_live_fetch,
+            )
 
         preview_dir = os.path.join(root, "map_preview")
         if not os.path.isdir(preview_dir):
@@ -1026,6 +986,100 @@ Write-Output $destPath
             if os.path.isfile(preview_path):
                 return preview_path
         return None
+
+    def get_all_mission_preview_paths(
+        self,
+        missions: "List[RC2Mission]",
+        copy_timeout_seconds: int | None = None,
+        list_timeout_seconds: int | None = None,
+    ) -> "dict[str, str | None]":
+        """Return {guid: disk_cache_path | None} for every mission.
+
+        For MTP paths a single PowerShell listing call is shared across all
+        missions; timestamps determine whether each image needs re-fetching.
+        For other path types each mission is looked up individually."""
+        root = (self._config.rc2_folder or "").strip()
+        if not root:
+            return {m.guid: None for m in missions}
+
+        if self._is_mtp_path(root):
+            self._load_preview_timestamps(root)
+            preview_folder = self._mtp_join(root, "map_preview")
+            ok_bulk, bulk_info = self._list_mtp_preview_bulk(
+                preview_folder, timeout_seconds=list_timeout_seconds
+            )
+
+            result: dict[str, str | None] = {}
+            for mission in missions:
+                guid = mission.guid
+                cache_base = self._preview_cache_path(root, guid)
+
+                if not ok_bulk:
+                    result[guid] = self._find_usable_cached_preview(cache_base, guid)
+                    continue
+
+                entry = bulk_info.get(guid.upper())
+                if not entry:
+                    result[guid] = self._find_usable_cached_preview(cache_base, guid)
+                    continue
+
+                preview_name = entry["preview_name"]
+                parent_name = entry["parent_name"]
+                device_ts = entry["device_ts"]
+                source_folder = (
+                    self._mtp_join(preview_folder, parent_name)
+                    if parent_name else preview_folder
+                )
+
+                cached = self._find_usable_cached_preview(cache_base, guid)
+                cached_ts = self._preview_timestamp_cache.get(guid, "")
+                if cached and (not device_ts or device_ts == cached_ts):
+                    result[guid] = cached
+                    continue
+
+                # Device has a newer image — copy from device.
+                if cached:
+                    try:
+                        os.remove(cached)
+                    except OSError:
+                        pass
+
+                ext = os.path.splitext(preview_name)[1].lower() or ".jpg"
+                cache_path = f"{cache_base}{ext}"
+                temp_copy = self._cache_temp_copy_path(cache_path)
+                if copy_timeout_seconds is None:
+                    ok, _ = self._copy_file_from_mtp_folder(
+                        source_folder, preview_name, temp_copy
+                    )
+                else:
+                    ok, _ = self._copy_file_from_mtp_folder(
+                        source_folder, preview_name, temp_copy,
+                        timeout_seconds=copy_timeout_seconds,
+                    )
+                if ok and self._is_usable_preview_file(temp_copy):
+                    self._promote_cache_copy(temp_copy, cache_path)
+                    if device_ts:
+                        self._preview_timestamp_cache[guid] = device_ts
+                        self._save_preview_timestamps(root)
+                    result[guid] = cache_path
+                else:
+                    if os.path.exists(temp_copy):
+                        try:
+                            os.remove(temp_copy)
+                        except OSError:
+                            pass
+                    result[guid] = None
+            return result
+
+        # ADB / local filesystem — fall back to individual lookups.
+        return {
+            m.guid: self.get_mission_preview_path(
+                m.guid,
+                copy_timeout_seconds=copy_timeout_seconds,
+                list_timeout_seconds=list_timeout_seconds,
+            )
+            for m in missions
+        }
 
     def _detect_mtp_rc2_folder(self) -> str | None:
         if os.name != "nt":
@@ -1165,53 +1219,7 @@ if ($devices) {
         if any(sep in name for sep in ("/", "\\")):
             return False, "Filename must not include path separators."
 
-        fd, temp_path = tempfile.mkstemp(prefix="djirc2kmzsync-waypoint-", suffix=".txt")
-        os.close(fd)
-
-        try:
-            with open(temp_path, "w", encoding="utf-8") as fh:
-                fh.write(content)
-
-            if self._is_mtp_path(root):
-                staged = temp_path
-                temp_dir: str | None = None
-                if os.path.basename(temp_path) != name:
-                    temp_dir = tempfile.mkdtemp(prefix="djirc2kmzsync-waypoint-stage-")
-                    staged = os.path.join(temp_dir, name)
-                    shutil.copy2(temp_path, staged)
-
-                try:
-                    ok, out = self._copy_file_to_mtp_folder(root, staged)
-                finally:
-                    if temp_dir:
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-
-                if not ok:
-                    return False, f"MTP write failed:\n{out}"
-                return True, f"Wrote {name} to {self._mtp_join(root, name)}"
-
-            if self._is_adb_path(root):
-                remote_root = self._adb_remote_root(root)
-                remote_dest = self._adb_remote_join(remote_root, name)
-                ok, out = self._run_adb(["push", temp_path, remote_dest])
-                if not ok:
-                    return False, f"ADB write failed:\n{out}"
-                return True, f"Wrote {name} to {remote_dest}"
-
-            if not os.path.isdir(root):
-                return False, f"RC-2 root folder not found:\n{root}"
-
-            dest_path = os.path.join(root, name)
-            with open(dest_path, "w", encoding="utf-8") as fh:
-                fh.write(content)
-            return True, f"Wrote {name} to {dest_path}"
-        except OSError as e:
-            return False, f"File operation failed:\n{e}"
-        finally:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
+        return self._rc_backend.write_text_file(root, name, content)
 
     # ------------------------------------------------------------------
     # Properties (forwarded from config for convenience)
@@ -1221,32 +1229,15 @@ if ($devices) {
         return self._config.rc2_folder
 
     def get_rc2_connection_mode(self) -> str:
-        root = (self._config.rc2_folder or "").strip()
-        if self._is_mtp_path(root):
-            return "MTP"
-        if self._is_adb_path(root):
-            return "ADB"
-        if root and os.path.isdir(root):
-            return "Filesystem"
-        if root:
-            return "Unavailable"
-        return "Not Set"
+        if not (self._config.rc2_folder or "").strip():
+            return "Not Set"
+        return self._rc_backend.get_connection_mode()
 
     def is_rc2_connected(self, timeout_seconds: int | None = None) -> bool:
         """Best-effort connectivity probe for the currently configured RC-2 root."""
-        root = (self._config.rc2_folder or "").strip()
-        if not root:
+        if not (self._config.rc2_folder or "").strip():
             return False
-
-        if self._is_mtp_path(root):
-            ok, _ = self._list_mtp_items(root, timeout_seconds=timeout_seconds)
-            return ok
-
-        if self._is_adb_path(root):
-            ok, _ = self.get_adb_status()
-            return ok
-
-        return os.path.isdir(root)
+        return self._rc_backend.is_connected(timeout_seconds=timeout_seconds)
 
     @property
     def pc_folder(self) -> str:
@@ -1268,6 +1259,9 @@ if ($devices) {
         else:
             self._config.rc2_folder = os.path.normpath(cleaned)
         self._mtp_preview_items_cache.clear()
+        self._preview_timestamp_cache.clear()
+        self._preview_timestamps_loaded = False
+        self._rc_backend = self._create_rc_backend(cleaned)
         self._config.save()
 
     def set_pc_folder(self, path: str) -> None:
@@ -1286,41 +1280,11 @@ if ($devices) {
         Scan the RC-2 root folder. Each sub-directory is a GUID mission slot.
         Returns a sorted list of RC2Mission objects.
         """
-        missions: List[RC2Mission] = []
         self._last_error = None
         root = self._config.rc2_folder
-        if self._is_mtp_path(root):
-            return self._load_rc2_missions_mtp(root)
-        if self._is_adb_path(root):
-            return self._load_rc2_missions_adb(root)
-        if not root or not os.path.isdir(root):
-            return missions
-
-        try:
-            for entry in sorted(os.scandir(root), key=lambda e: e.name):
-                if not entry.is_dir() or not self._is_rc2_slot_name(entry.name):
-                    continue
-                kmz_files = sorted(
-                    [
-                        f for f in os.listdir(entry.path)
-                        if f.lower().endswith(".kmz")
-                    ]
-                )
-                kmz_name = kmz_files[0] if kmz_files else ""
-                last_modified = ""
-                if kmz_name:
-                    kmz_path = os.path.join(entry.path, kmz_name)
-                    last_modified = self._format_local_mtime(kmz_path)
-                missions.append(RC2Mission(
-                    guid=entry.name,
-                    kmz_name=kmz_name,
-                    full_folder_path=entry.path,
-                    last_modified=last_modified,
-                ))
-        except OSError as e:
-            msg = f"[SyncViewModel] Error scanning RC-2 folder: {e}"
-            self._set_last_error(msg)
-
+        missions, err = self._rc_backend.list_missions(root)
+        if err:
+            self._set_last_error(err)
         return missions
 
     def _load_rc2_missions_mtp(self, mtp_path: str) -> List[RC2Mission]:
@@ -1405,133 +1369,30 @@ if ($devices) {
         return missions
 
     def _load_rc2_missions_adb(self, adb_path: str) -> List[RC2Mission]:
-        missions: List[RC2Mission] = []
-        remote_root = self._adb_remote_root(adb_path)
-
-        ok, out = self._run_adb(["shell", "ls", "-1", remote_root])
-        if not ok:
-            msg = f"[SyncViewModel] Error scanning RC-2 ADB folder: {out}"
-            self._set_last_error(msg)
-            return missions
-
-        entries = [line.strip() for line in out.splitlines() if line.strip()]
-        for entry in sorted(entries):
-            remote_slot = self._adb_remote_join(remote_root, entry)
-            ok_slot, slot_out = self._run_adb(["shell", "ls", "-1", remote_slot])
-            if not ok_slot:
-                continue
-
-            kmz_files = [
-                line.strip()
-                for line in slot_out.splitlines()
-                if line.strip().lower().endswith(".kmz")
-            ]
-            kmz_name = kmz_files[0] if kmz_files else ""
-            missions.append(RC2Mission(
-                guid=entry,
-                kmz_name=kmz_name,
-                full_folder_path=remote_slot,
-                last_modified="",
-            ))
-
+        missions, err = self._rc_backend.list_missions(adb_path)
+        if err:
+            self._set_last_error(f"[SyncViewModel] Error scanning RC-2 ADB folder: {err}")
         return missions
 
     def load_pc_kmz_files(self) -> List[KMZFile]:
         """
-           Recursively scan the PC source folder for .kmz files.
-           Returns a sorted list of KMZFile objects with full paths.
+        Recursively scan the PC source folder for .kmz files.
+        Returns a sorted list of KMZFile objects with full paths.
         """
-        files: List[KMZFile] = []
         self._last_error = None
-        root = self._config.pc_folder
-        if not root or not os.path.isdir(root):
-            return files
-
-        try:
-               for entry in sorted(os.walk(root)):
-                   folder_path, _, filenames = entry
-                   for filename in sorted(filenames):
-                       if filename.lower().endswith(".kmz"):
-                           full_path = os.path.join(folder_path, filename)
-                           # Store relative path for display
-                           rel_path = os.path.relpath(full_path, root)
-                           files.append(KMZFile(filename=rel_path, full_path=full_path))
-        except OSError as e:
-            msg = f"[SyncViewModel] Error scanning PC folder: {e}"
-            self._set_last_error(msg)
-
+        files, err = self._pc_backend.list_kmz_files()
+        if err:
+            self._set_last_error(err)
         return files
 
     def delete_rc2_mission(self, mission: RC2Mission) -> Tuple[bool, str]:
-        root = (self._config.rc2_folder or "").strip()
-
-        if self._is_mtp_path(root):
-            script = self._mtp_script(
-                root,
-                f"""
-$folderName = {self._ps_single_quote(mission.guid)}
-$item = $current.Items() | Where-Object {{ $_.Name -eq $folderName -and $_.IsFolder }} | Select-Object -First 1
-if (-not $item) {{
-    throw "Mission folder not found: $folderName"
-}}
-
-$item.InvokeVerb('delete')
-
-$deadline = (Get-Date).AddSeconds(15)
-do {{
-    $remaining = $current.Items() | Where-Object {{ $_.Name -eq $folderName -and $_.IsFolder }} | Select-Object -First 1
-    if (-not $remaining) {{
-        break
-    }}
-    [System.Threading.Thread]::Sleep(200)
-}} while ((Get-Date) -lt $deadline)
-
-$remaining = $current.Items() | Where-Object {{ $_.Name -eq $folderName -and $_.IsFolder }} | Select-Object -First 1
-if ($remaining) {{
-    throw "Mission folder delete did not complete: $folderName"
-}}
-
-Write-Output $folderName
-""",
-            )
-            ok, out = self._run_powershell(script, timeout_seconds=self.MTP_COPY_TIMEOUT_SECONDS)
-            if not ok:
-                return False, f"MTP delete failed:\n{out}"
-            return True, f"Deleted mission {mission.guid}"
-
-        if self._is_adb_path(root):
-            remote_root = self._adb_remote_root(root)
-            remote_slot = self._adb_remote_join(remote_root, mission.guid)
-            ok, out = self._run_adb(["shell", "rm", "-rf", remote_slot])
-            if not ok:
-                return False, f"ADB delete failed:\n{out}"
-            return True, f"Deleted mission {mission.guid}"
-
-        if not os.path.isdir(mission.full_folder_path):
-            return False, f"Mission folder not found:\n{mission.full_folder_path}"
-
-        try:
-            shutil.rmtree(mission.full_folder_path)
-        except OSError as e:
-            return False, f"File operation failed:\n{e}"
-
-        return True, f"Deleted mission {mission.guid}"
+        ok, msg = self._rc_backend.delete_mission(mission)
+        if ok:
+            self.clear_preview_cache_for_guid(mission.guid)
+        return ok, msg
 
     def delete_pc_kmz_file(self, kmz_file: KMZFile) -> Tuple[bool, str]:
-        pc_root = (self._config.pc_folder or "").strip()
-        if not pc_root or not os.path.isdir(pc_root):
-            return False, f"PC KMZ folder not found:\n{pc_root}"
-
-        file_path = kmz_file.full_path
-        if not os.path.isfile(file_path):
-            return False, f"KMZ file not found:\n{file_path}"
-
-        try:
-            os.remove(file_path)
-        except OSError as e:
-            return False, f"File operation failed:\n{e}"
-
-        return True, f"Deleted KMZ file {kmz_file.filename}"
+        return self._pc_backend.delete_file(kmz_file)
 
     def get_adb_status(self) -> Tuple[bool, str]:
         """
@@ -1585,40 +1446,16 @@ Write-Output $folderName
         target_mission = mission
         dest_filename = mission.kmz_name if mission.kmz_name else f"{mission.guid}.kmz"
 
-        if self._is_mtp_path(self._config.rc2_folder):
-            ok, msg = self._execute_copy_mtp(target_mission, kmz_file, dest_filename)
-            if ok:
-                self._record_copy_mapping(kmz_file, target_mission, dest_filename)
-            return ok, msg
-
-        if self._is_adb_path(self._config.rc2_folder):
-            ok, msg = self._execute_copy_adb(target_mission, kmz_file, dest_filename)
-            if ok:
-                self._record_copy_mapping(kmz_file, target_mission, dest_filename)
-            return ok, msg
-
-        dest_path = os.path.join(target_mission.full_folder_path, dest_filename)
-
-        if not os.path.isfile(kmz_file.full_path):
-            return False, f"Source file not found:\n{kmz_file.full_path}"
-
-        if not os.path.isdir(target_mission.full_folder_path):
-            return False, f"Destination slot folder not found:\n{target_mission.full_folder_path}"
-
-        try:
-            if os.path.exists(dest_path):
-                os.remove(dest_path)
-            shutil.copy2(kmz_file.full_path, dest_path)
-        except OSError as e:
-            return False, f"File operation failed:\n{e}"
-
-        self._record_copy_mapping(kmz_file, target_mission, dest_filename)
-
-        return True, (
-            f"Copied '{kmz_file.filename}'\n"
-            f"  → mission  : {target_mission.guid}\n"
-            f"  → saved as : {dest_filename}"
+        copy_fn = (
+            self._execute_copy_mtp
+            if self._rc_backend.get_connection_mode() == "MTP"
+            else self._execute_copy_adb
         )
+        ok, msg = copy_fn(target_mission, kmz_file, dest_filename)
+        if ok:
+            self._record_copy_mapping(kmz_file, target_mission, dest_filename)
+            self.clear_preview_cache_for_guid(target_mission.guid)
+        return ok, msg
 
     def execute_copy_from_mission(
         self,
@@ -1648,86 +1485,17 @@ Write-Output $folderName
 
         target_filename = target_kmz_file.filename if target_kmz_file is not None else f"{mission.guid}.kmz"
         dest_path = os.path.join(pc_root, target_filename)
-        root = (self._config.rc2_folder or "").strip()
 
-        if self._is_mtp_path(root):
-            fd, temp_path = tempfile.mkstemp(prefix="djirc2kmzsync-copyback-", suffix=".kmz")
-            os.close(fd)
-            try:
-                ok, out = self._copy_file_from_mtp_folder(mission.full_folder_path, source_filename, temp_path)
-                if not ok:
-                    return False, f"MTP copy back failed:\n{out}"
-                if os.path.exists(dest_path):
-                    os.remove(dest_path)
-                shutil.copy2(temp_path, dest_path)
-            except OSError as e:
-                return False, f"File operation failed:\n{e}"
-            finally:
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-
-            self._record_copy_mapping(
-                KMZFile(filename=target_filename, full_path=dest_path),
-                mission,
-                source_filename,
-            )
-
-            return True, (
-                f"Copied mission '{source_filename}'\n"
-                f"  → target file: {target_filename}\n"
-                f"  → location   : {dest_path}"
-            )
-
-        if self._is_adb_path(root):
-            fd, temp_path = tempfile.mkstemp(prefix="djirc2kmzsync-copyback-", suffix=".kmz")
-            os.close(fd)
-            remote_file = self._adb_remote_join(mission.full_folder_path, source_filename)
-            try:
-                ok, out = self._run_adb(["pull", remote_file, temp_path])
-                if not ok:
-                    return False, f"ADB copy back failed:\n{out}"
-                if os.path.exists(dest_path):
-                    os.remove(dest_path)
-                shutil.copy2(temp_path, dest_path)
-            except OSError as e:
-                return False, f"File operation failed:\n{e}"
-            finally:
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-
-            self._record_copy_mapping(
-                KMZFile(filename=target_filename, full_path=dest_path),
-                mission,
-                source_filename,
-            )
-
-            return True, (
-                f"Copied mission '{source_filename}'\n"
-                f"  → target file: {target_filename}\n"
-                f"  → location   : {dest_path}"
-            )
-
-        source_path = os.path.join(mission.full_folder_path, source_filename)
-        if not os.path.isfile(source_path):
-            return False, f"Mission source file not found:\n{source_path}"
-
-        try:
-            if os.path.exists(dest_path):
-                os.remove(dest_path)
-            shutil.copy2(source_path, dest_path)
-        except OSError as e:
-            return False, f"File operation failed:\n{e}"
-
+        ok, out = self._rc_backend.copy_file_from_device(
+            mission.full_folder_path, source_filename, dest_path
+        )
+        if not ok:
+            return False, f"Copy from device failed:\n{out}"
         self._record_copy_mapping(
             KMZFile(filename=target_filename, full_path=dest_path),
             mission,
             source_filename,
         )
-
         return True, (
             f"Copied mission '{source_filename}'\n"
             f"  → target file: {target_filename}\n"
@@ -1737,31 +1505,9 @@ Write-Output $folderName
     def _prepare_new_mission_target(self) -> Tuple[bool, RC2Mission | str]:
         new_guid = str(uuid.uuid4()).upper()
         root = (self._config.rc2_folder or "").strip()
-
-        if self._is_mtp_path(root):
-            ok, out = self._create_mtp_slot_folder(root, new_guid)
-            if not ok:
-                return False, f"Failed to create MTP slot folder:\n{out}"
-            full_folder = self._mtp_join(root, new_guid)
-            return True, RC2Mission(guid=new_guid, kmz_name="", full_folder_path=full_folder)
-
-        if self._is_adb_path(root):
-            remote_root = self._adb_remote_root(root)
-            remote_slot = self._adb_remote_join(remote_root, new_guid)
-            ok, out = self._run_adb(["shell", "mkdir", "-p", remote_slot])
-            if not ok:
-                return False, f"Failed to create ADB slot folder:\n{out}"
-            return True, RC2Mission(guid=new_guid, kmz_name="", full_folder_path=remote_slot)
-
-        if not root or not os.path.isdir(root):
-            return False, f"RC-2 root folder not found:\n{root}"
-
-        full_folder = os.path.join(root, new_guid)
-        try:
-            os.makedirs(full_folder, exist_ok=False)
-        except OSError as e:
-            return False, f"Failed to create destination slot folder:\n{e}"
-
+        ok, full_folder = self._rc_backend.create_slot_folder(root, new_guid)
+        if not ok:
+            return False, f"Failed to create slot folder:\n{full_folder}"
         return True, RC2Mission(guid=new_guid, kmz_name="", full_folder_path=full_folder)
 
     def _execute_copy_mtp(
@@ -1773,27 +1519,147 @@ Write-Output $folderName
         if not os.path.isfile(kmz_file.full_path):
             return False, f"Source file not found:\n{kmz_file.full_path}"
 
-        source_to_copy = kmz_file.full_path
-        temp_dir: str | None = None
-        if os.path.basename(kmz_file.full_path) != dest_filename:
-            temp_dir = tempfile.mkdtemp(prefix="djirc2kmzsync-")
-            source_to_copy = os.path.join(temp_dir, dest_filename)
-            shutil.copy2(kmz_file.full_path, source_to_copy)
-
-        try:
-            ok, out = self._copy_file_to_mtp_folder(mission.full_folder_path, source_to_copy)
-        finally:
-            if temp_dir:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-
+        ok, out = self._rc_backend.copy_file_to_device(
+            mission.full_folder_path, kmz_file.full_path, dest_filename
+        )
         if not ok:
             return False, f"MTP copy failed:\n{out}"
+
+        verified, verify_msg = self._verify_mtp_copy_via_pull(
+            mission, kmz_file.full_path, dest_filename
+        )
+        if not verified:
+            return False, f"MTP copy verification failed:\n{verify_msg}"
 
         return True, (
             f"Copied '{kmz_file.filename}'\n"
             f"  → mission  : {mission.guid}\n"
             f"  → saved as : {dest_filename}"
         )
+
+    def _verify_mtp_copy_via_pull(
+        self,
+        mission: RC2Mission,
+        source_path: str,
+        dest_filename: str,
+    ) -> Tuple[bool, str]:
+        expected_size = os.path.getsize(source_path)
+
+        fd, temp_path = tempfile.mkstemp(prefix="djirc2kmzsync-verify-", suffix=".kmz")
+        os.close(fd)
+        try:
+            ok_pull, out_pull = self._copy_file_from_mtp_folder(
+                mission.full_folder_path,
+                dest_filename,
+                temp_path,
+                timeout_seconds=self.MTP_VERIFY_TIMEOUT_SECONDS,
+            )
+            if not ok_pull:
+                return False, f"Unable to pull destination for verification:\n{out_pull}"
+
+            actual_size = os.path.getsize(temp_path)
+            size_diff = abs(actual_size - expected_size)
+            percent_diff = (size_diff / float(expected_size) * 100.0) if expected_size > 0 else 100.0
+            if actual_size <= 0 or (
+                size_diff > self.MTP_SIZE_TOLERANCE_BYTES
+                and percent_diff > self.MTP_SIZE_TOLERANCE_PERCENT
+            ):
+                return False, (
+                    "Destination size mismatch.\n"
+                    f"Expected size: {expected_size} bytes\n"
+                    f"Destination size: {actual_size} bytes\n"
+                    f"Tolerance: {self.MTP_SIZE_TOLERANCE_PERCENT}% or {self.MTP_SIZE_TOLERANCE_BYTES} bytes"
+                )
+        except OSError as e:
+            return False, f"Verification failed:\n{e}"
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+        return True, "ok"
+
+    def _verify_mtp_copy_quick(
+        self,
+        mission: RC2Mission,
+        kmz_file: KMZFile,
+        dest_filename: str,
+    ) -> Tuple[bool, str]:
+        deadline = time.monotonic() + 6.0
+        last_size: int | None = None
+
+        while True:
+            ok_list, result = self._list_mtp_items(mission.full_folder_path, timeout_seconds=8)
+            if ok_list and isinstance(result, list):
+                match = next(
+                    (
+                        item for item in result
+                        if not bool(item.get("IsFolder"))
+                        and str(item.get("Name") or "").strip() == dest_filename
+                    ),
+                    None,
+                )
+                if match is not None:
+                    try:
+                        current_size = int(match.get("Size") or 0)
+                    except (TypeError, ValueError):
+                        current_size = 0
+                    last_size = current_size
+                    return True, "ok"
+
+            if time.monotonic() >= deadline:
+                return False, (
+                    "MTP copy could not be confirmed at destination filename.\n"
+                    f"Destination size: {last_size if last_size is not None else 'missing'} bytes"
+                )
+            time.sleep(0.2)
+
+    def _verify_mtp_copied_bytes(
+        self,
+        mission: RC2Mission,
+        kmz_file: KMZFile,
+        dest_filename: str,
+    ) -> Tuple[bool, str]:
+        expected_size = os.path.getsize(kmz_file.full_path)
+        try:
+            with open(kmz_file.full_path, "rb") as source_fh:
+                source_hash = hashlib.sha256(source_fh.read()).hexdigest()
+        except OSError as e:
+            return False, f"MTP copy verification failed (unable to read source):\n{e}"
+
+        # MTP can briefly report stale bytes right after CopyHere returns.
+        deadline = time.monotonic() + 2.5
+        last_detail = ""
+        while True:
+            ok_read, payload = self._read_slot_file_bytes(mission, dest_filename)
+            if ok_read and isinstance(payload, bytes):
+                copied_bytes = payload
+                copied_size = len(copied_bytes)
+                if copied_size == expected_size:
+                    copied_hash = hashlib.sha256(copied_bytes).hexdigest()
+                    if copied_hash == source_hash:
+                        return True, "ok"
+                    last_detail = (
+                        "MTP copy verification failed (content hash mismatch).\n"
+                        f"Source SHA256: {source_hash}\n"
+                        f"Destination SHA256: {copied_hash}"
+                    )
+                else:
+                    last_detail = (
+                        "MTP copy verification failed (size mismatch).\n"
+                        f"Source size: {expected_size} bytes\n"
+                        f"Destination size: {copied_size} bytes"
+                    )
+            else:
+                detail = payload if isinstance(payload, str) else "unknown read error"
+                last_detail = f"MTP copy verification failed (unable to read destination):\n{detail}"
+
+            if time.monotonic() >= deadline:
+                return False, last_detail
+            time.sleep(0.25)
+
+        return False, "MTP copy verification failed (unknown state)."
 
     def _execute_copy_adb(
         self,
@@ -1804,13 +1670,11 @@ Write-Output $folderName
         if not os.path.isfile(kmz_file.full_path):
             return False, f"Source file not found:\n{kmz_file.full_path}"
 
-        remote_root = self._adb_remote_root(self._config.rc2_folder)
-        remote_slot = self._adb_remote_join(remote_root, mission.guid)
-        remote_dest = self._adb_remote_join(remote_slot, dest_filename)
-
-        ok, out = self._run_adb(["push", kmz_file.full_path, remote_dest])
+        ok, out = self._rc_backend.copy_file_to_device(
+            mission.full_folder_path, kmz_file.full_path, dest_filename
+        )
         if not ok:
-            return False, f"ADB push failed:\n{out}"
+            return False, f"ADB copy failed:\n{out}"
 
         return True, (
             f"Copied '{kmz_file.filename}'\n"
@@ -1819,80 +1683,10 @@ Write-Output $folderName
         )
 
     def _list_slot_files(self, mission: RC2Mission) -> Tuple[bool, List[str] | str]:
-        root = (self._config.rc2_folder or "").strip()
-
-        if self._is_mtp_path(root):
-            ok, result = self._list_mtp_items(mission.full_folder_path)
-            if not ok:
-                return False, str(result)
-            items = result if isinstance(result, list) else []
-            names = [
-                str(item.get("Name") or "").strip()
-                for item in items
-                if str(item.get("Name") or "").strip()
-            ]
-            return True, sorted(names)
-
-        if self._is_adb_path(root):
-            ok, out = self._run_adb(["shell", "ls", "-1", mission.full_folder_path])
-            if not ok:
-                return False, out
-            names = [line.strip() for line in out.splitlines() if line.strip()]
-            return True, sorted(names)
-
-        if not os.path.isdir(mission.full_folder_path):
-            return False, f"Slot folder not found: {mission.full_folder_path}"
-
-        try:
-            names = [entry.name for entry in os.scandir(mission.full_folder_path)]
-        except OSError as e:
-            return False, str(e)
-        return True, sorted(names)
+        return self._rc_backend.list_slot_files(mission)
 
     def _read_slot_file_bytes(self, mission: RC2Mission, filename: str) -> Tuple[bool, bytes | str]:
-        root = (self._config.rc2_folder or "").strip()
-
-        if self._is_mtp_path(root):
-            fd, temp_path = tempfile.mkstemp(prefix="djirc2kmzsync-inspect-", suffix=".kmz")
-            os.close(fd)
-            try:
-                ok, out = self._copy_file_from_mtp_folder(mission.full_folder_path, filename, temp_path)
-                if not ok:
-                    return False, out
-                with open(temp_path, "rb") as fh:
-                    return True, fh.read()
-            except OSError as e:
-                return False, str(e)
-            finally:
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-
-        if self._is_adb_path(root):
-            fd, temp_path = tempfile.mkstemp(prefix="djirc2kmzsync-inspect-", suffix=".kmz")
-            os.close(fd)
-            remote_file = self._adb_remote_join(mission.full_folder_path, filename)
-            try:
-                ok, out = self._run_adb(["pull", remote_file, temp_path])
-                if not ok:
-                    return False, out
-                with open(temp_path, "rb") as fh:
-                    return True, fh.read()
-            except OSError as e:
-                return False, str(e)
-            finally:
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-
-        local_file = os.path.join(mission.full_folder_path, filename)
-        try:
-            with open(local_file, "rb") as fh:
-                return True, fh.read()
-        except OSError as e:
-            return False, str(e)
+        return self._rc_backend.read_file_bytes(mission, filename)
 
     @classmethod
     def _mtp_parent_path(cls, mtp_path: str, levels: int = 1) -> str | None:
@@ -1907,36 +1701,8 @@ Write-Output $folderName
     def _list_folder_items_with_type(self, folder_path: str) -> Tuple[bool, List[Tuple[str, bool, str]] | str]:
         root = (self._config.rc2_folder or "").strip()
 
-        if self._is_mtp_path(root):
-            ok, result = self._list_mtp_items(folder_path)
-            if not ok:
-                return False, str(result)
-            items = result if isinstance(result, list) else []
-            output: List[Tuple[str, bool, str]] = []
-            for item in items:
-                name = str(item.get("Name") or "").strip()
-                if not name:
-                    continue
-                modified = self._normalize_mtp_modify_date(
-                    str(item.get("ModifyDateDetail") or "")
-                    or str(item.get("ModifyDate") or "")
-                )
-                output.append((name, bool(item.get("IsFolder")), modified))
-            return True, output
-
-        if self._is_adb_path(root):
-            ok, out = self._run_adb(["shell", "ls", "-1p", folder_path])
-            if not ok:
-                return False, out
-            output = []
-            for line in out.splitlines():
-                raw = line.strip()
-                if not raw:
-                    continue
-                is_folder = raw.endswith("/")
-                name = raw[:-1] if is_folder else raw
-                output.append((name, is_folder, ""))
-            return True, output
+        if self._is_mtp_path(root) or self._is_adb_path(root):
+            return self._rc_backend.list_folder_items(folder_path)
 
         if not os.path.isdir(folder_path):
             return False, f"Folder not found: {folder_path}"
@@ -1958,40 +1724,8 @@ Write-Output $folderName
     def _read_file_bytes_from_folder(self, folder_path: str, filename: str) -> Tuple[bool, bytes | str]:
         root = (self._config.rc2_folder or "").strip()
 
-        if self._is_mtp_path(root):
-            fd, temp_path = tempfile.mkstemp(prefix="djirc2kmzsync-meta-", suffix=".tmp")
-            os.close(fd)
-            try:
-                ok, out = self._copy_file_from_mtp_folder(folder_path, filename, temp_path)
-                if not ok:
-                    return False, out
-                with open(temp_path, "rb") as fh:
-                    return True, fh.read()
-            except OSError as e:
-                return False, str(e)
-            finally:
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-
-        if self._is_adb_path(root):
-            fd, temp_path = tempfile.mkstemp(prefix="djirc2kmzsync-meta-", suffix=".tmp")
-            os.close(fd)
-            remote_file = self._adb_remote_join(folder_path, filename)
-            try:
-                ok, out = self._run_adb(["pull", remote_file, temp_path])
-                if not ok:
-                    return False, out
-                with open(temp_path, "rb") as fh:
-                    return True, fh.read()
-            except OSError as e:
-                return False, str(e)
-            finally:
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
+        if self._is_mtp_path(root) or self._is_adb_path(root):
+            return self._rc_backend.read_file_bytes_from_path(folder_path, filename)
 
         local_file = os.path.join(folder_path, filename)
         try:
