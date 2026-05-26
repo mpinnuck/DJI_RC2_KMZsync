@@ -3,8 +3,9 @@
 # DJI RC2 KMZ Sync build commands
 # .venv\Scripts\Activate.ps1
 # .venv\Scripts\python.exe -m pip install pyinstaller pillow
-# .venv\Scripts\python.exe -m PyInstaller --noconfirm --clean DJI_RC2_KMZsync.spec
-#
+# Windows build
+# .venv\Scripts\python.exe -m PyInstaller --noconfirm --clean DJI_RC2_KMZsync_w.spec
+# .venvm\Scripts\python.exe -m PyInstaller --noconfirm --clean DJI_RC2_KMZsync_m.spec
 
 import tkinter as tk
 
