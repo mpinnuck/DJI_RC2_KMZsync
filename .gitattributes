@@ -1,0 +1,23 @@
+# Enforce consistent text normalization across platforms.
+* text=auto eol=lf
+
+# Common project text files
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.json text eol=lf
+*.spec text eol=lf
+
+# Windows script files keep CRLF when/if added.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files should never be line-ending normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.kmz binary
+*.zip binary
