@@ -133,6 +133,10 @@ class MainView:
         if self._preview_popup is not None and self._preview_popup.winfo_exists():
             self._preview_popup.destroy()
         self._hide_busy_popup()
+        try:
+            self._vm.shutdown()
+        except Exception:
+            pass
         self._root.destroy()
 
     def _start_rc2_connection_monitor(self) -> None:

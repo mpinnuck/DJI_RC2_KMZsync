@@ -1,6 +1,9 @@
 import json
+import logging
 import os
 import sys
+
+_logger = logging.getLogger(__name__)
 
 CONFIG_FILE = "kmz_sync_config.json"
 
@@ -95,7 +98,7 @@ class ConfigManager:
             with open(config_path, "w") as f:
                 json.dump(self._config, f, indent=4)
         except OSError as e:
-            print(f"[ConfigManager] Failed to save config: {e}")
+            _logger.warning("Failed to save config: %s", e)
 
     # ------------------------------------------------------------------
     # Private
@@ -112,4 +115,4 @@ class ConfigManager:
                 loaded = json.load(f)
             self._config.update(loaded)
         except (OSError, json.JSONDecodeError) as e:
-            print(f"[ConfigManager] Failed to load config: {e}")
+            _logger.warning("Failed to load config: %s", e)

@@ -7,7 +7,7 @@ based on the configured RC-2 path and the current platform.
 Backend selection matrix:
     Path prefix   | Windows              | macOS
     --------------|----------------------|------------------
-    mtp:...       | WindowsMTPBackend    | UnsupportedBackendError
+    mtp:...       | WindowsMTPBackend    | MacMTPBackend
     adb:...       | WindowsADBBackend    | MacADBBackend
     (no prefix)   | UnsupportedBackendError (RC-2 is Android, not a local path)
 
@@ -21,6 +21,7 @@ import os
 
 from backends.adb.mac_adb_backend import MacADBBackend
 from backends.adb.windows_adb_backend import WindowsADBBackend
+from backends.mtp.mac_mtp_backend import MacMTPBackend
 from backends.mtp.windows_mtp_backend import WindowsMTPBackend
 from backends.pc.pc_backend import PCBackend
 from backends.rc_backend import RCBackend
@@ -53,11 +54,7 @@ class BackendFactory:
 
         if cleaned.lower().startswith("mtp:"):
             if not is_windows:
-                raise UnsupportedBackendError(
-                    "MTP access is only supported on Windows. "
-                    "On macOS, connect the RC-2 via USB with USB debugging "
-                    "enabled and use an adb: path instead."
-                )
+                return MacMTPBackend(config)
             return WindowsMTPBackend(config)
 
         if cleaned.lower().startswith("adb:"):

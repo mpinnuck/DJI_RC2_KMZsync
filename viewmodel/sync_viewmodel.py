@@ -19,9 +19,97 @@ except ImportError:
     Image = None
 
 from backends.backend_factory import BackendFactory, UnsupportedBackendError
+from backends.rc_backend import RCBackend
 from config.config_manager import ConfigManager, get_runtime_base_dir
 from model.kmz_file import KMZFile
 from model.rc2_mission import RC2Mission
+
+
+class _UnavailableRCBackend(RCBackend):
+    """RC backend that reports a fixed unsupported-backend error."""
+
+    def __init__(self, message: str) -> None:
+        self._message = (message or "Requested RC backend is unavailable.").strip()
+
+    def is_connected(self, timeout_seconds: int | None = None) -> bool:
+        return False
+
+    def get_connection_mode(self) -> str:
+        return "Unavailable"
+
+    def probe_root(self, path: str) -> bool:
+        return False
+
+    def list_missions(self, root: str) -> Tuple[List[RC2Mission], str | None]:
+        return [], self._message
+
+    def list_slot_files(self, mission: RC2Mission) -> Tuple[bool, List[str] | str]:
+        return False, self._message
+
+    def list_folder_items(
+        self, path: str
+    ) -> Tuple[bool, List[Tuple[str, bool, str]] | str]:
+        return False, self._message
+
+    def read_file_bytes(
+        self, mission: RC2Mission, filename: str
+    ) -> Tuple[bool, bytes | str]:
+        return False, self._message
+
+    def read_file_bytes_from_path(
+        self, folder: str, filename: str
+    ) -> Tuple[bool, bytes | str]:
+        return False, self._message
+
+    def delete_file(self, mission: RC2Mission, filename: str) -> Tuple[bool, str]:
+        return False, self._message
+
+    def copy_file_to_device(
+        self,
+        dest_folder: str,
+        local_source_path: str,
+        dest_filename: str,
+    ) -> Tuple[bool, str]:
+        return False, self._message
+
+    def write_text_file(
+        self,
+        dest_folder: str,
+        filename: str,
+        content: str,
+    ) -> Tuple[bool, str]:
+        return False, self._message
+
+    def copy_file_from_device(
+        self,
+        src_folder: str,
+        filename: str,
+        local_dest_path: str,
+        timeout_seconds: int | None = None,
+    ) -> Tuple[bool, str]:
+        return False, self._message
+
+    def create_slot_folder(self, root: str, guid: str) -> Tuple[bool, str]:
+        return False, self._message
+
+    def delete_mission(self, mission: RC2Mission) -> Tuple[bool, str]:
+        return False, self._message
+
+    def get_preview_path(
+        self,
+        root: str,
+        guid: str,
+        copy_timeout_seconds: int | None = None,
+        list_timeout_seconds: int | None = None,
+        allow_live_fetch: bool = True,
+    ) -> str | None:
+        return None
+
+    def clear_preview_cache(self, root: str) -> None:
+        return None
+
+    def get_status(self) -> Tuple[bool, str]:
+        return False, self._message
 
 
 class SyncViewModel:
@@ -82,9 +170,16 @@ class SyncViewModel:
         Build the RC backend for *path*, falling back to a disconnected ADB
         backend when the path uses no recognised protocol prefix.
         """
+        cleaned = (path or "").strip()
         try:
             return BackendFactory.create_rc(path, self._config)
-        except UnsupportedBackendError:
+        except UnsupportedBackendError as exc:
+            # If the user explicitly selected a protocol path that is not
+            # supported on this platform (e.g. mtp: on macOS), preserve that
+            # error rather than masking it as an ADB offline issue.
+            if self._is_adb_path(cleaned) or self._is_mtp_path(cleaned):
+                return _UnavailableRCBackend(str(exc))
+
             # Path is not a recognised device protocol (e.g. a bare filesystem
             # path entered before the adb:/mtp: prefix was configured).  Keep a
             # disconnected ADB backend so connectivity checks return False cleanly.
@@ -745,6 +840,15 @@ if ($result.Count -gt 0) { @($result) | ConvertTo-Json -Compress }
             return None
 
         if self._is_mtp_path(root):
+            if os.name != "nt":
+                # macOS: native MTP — delegate to the platform backend.
+                return self._rc_backend.get_preview_path(
+                    root, guid,
+                    copy_timeout_seconds=copy_timeout_seconds,
+                    list_timeout_seconds=list_timeout_seconds,
+                    allow_live_fetch=allow_live_fetch,
+                )
+
             cache_base = self._preview_cache_path(root, guid)
 
             # Load persisted timestamps once per session so restarts are fast.
@@ -847,6 +951,25 @@ if ($result.Count -gt 0) { @($result) | ConvertTo-Json -Compress }
             return {m.guid: None for m in missions}
 
         if self._is_mtp_path(root):
+            if os.name != "nt":
+                # macOS: native MTP — fetch all previews in a single backend connection.
+                bulk_fetch = getattr(self._rc_backend, "get_preview_paths_bulk", None)
+                if callable(bulk_fetch):
+                    return bulk_fetch(
+                        root,
+                        [m.guid for m in missions],
+                        copy_timeout_seconds=copy_timeout_seconds,
+                        list_timeout_seconds=list_timeout_seconds,
+                    )
+                return {
+                    m.guid: self._rc_backend.get_preview_path(
+                        root, m.guid,
+                        copy_timeout_seconds=copy_timeout_seconds,
+                        list_timeout_seconds=list_timeout_seconds,
+                    )
+                    for m in missions
+                }
+
             self._load_preview_timestamps(root)
             preview_folder = self._mtp_join(root, "map_preview")
             ok_bulk, bulk_info = self._list_mtp_preview_bulk(
@@ -1048,6 +1171,7 @@ if ($devices) {
     # ------------------------------------------------------------------
     def set_rc2_folder(self, path: str) -> None:
         cleaned = path.strip()
+        old_backend = self._rc_backend
         if self._is_adb_path(cleaned) or self._is_mtp_path(cleaned):
             self._config.rc2_folder = cleaned
         else:
@@ -1055,7 +1179,22 @@ if ($devices) {
         self._preview_timestamp_cache.clear()
         self._preview_timestamps_loaded = False
         self._rc_backend = self._create_rc_backend(cleaned)
+        close_old = getattr(old_backend, "close", None)
+        if callable(close_old):
+            try:
+                close_old()
+            except Exception:
+                pass
         self._config.save()
+
+    def shutdown(self) -> None:
+        """Release backend resources on app close."""
+        close_backend = getattr(self._rc_backend, "close", None)
+        if callable(close_backend):
+            try:
+                close_backend()
+            except Exception:
+                pass
 
     def set_pc_folder(self, path: str) -> None:
         self._config.pc_folder = os.path.normpath(path)

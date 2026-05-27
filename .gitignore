@@ -10,6 +10,8 @@ __pycache__/
 
 # Config (contains local paths)
 kmz_sync_config.json
+*_w.json
+*_m.json
 
 # VS Code
 .vscode/
@@ -22,6 +24,8 @@ build/
 # Test coverage
 .coverage
 htmlcov/
+tests/
+tools/
 
 # OS
 .DS_Store
