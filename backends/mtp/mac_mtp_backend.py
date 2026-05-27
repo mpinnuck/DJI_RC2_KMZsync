@@ -519,7 +519,20 @@ class MacMTPBackend(RCBackend):
                 return True
         except Exception:
             pass
-        return self._pull_via_cli(item_id, local_dest)
+
+        # Some RC-2 / libmtp combinations fail reads via pymtp with CommandFailed
+        # but succeed via mtp-getfile. Ensure pymtp releases its session before
+        # invoking the CLI path to avoid competing device sessions.
+        self._disconnect()
+        if self._pull_via_cli(item_id, local_dest):
+            return True
+
+        # Best-effort reconnection for subsequent operations in this process.
+        try:
+            self._ensure_connected()
+        except Exception:
+            pass
+        return False
 
     @staticmethod
     def _pull_via_cli(item_id: int, local_dest: str) -> bool:
@@ -570,6 +583,15 @@ class MacMTPBackend(RCBackend):
                 s = part.strip()
                 if s:
                     parts.append(s)
+
+        # macOS libmtp folder traversal starts at storage roots (e.g. Android),
+        # not at Explorer-style labels like "DJI RC 2|Internal shared storage".
+        # If Android appears later in the path, trim everything before it.
+        for idx, segment in enumerate(parts):
+            if segment.lower() == "android":
+                if idx > 0:
+                    parts = parts[idx:]
+                break
         return parts
 
     # ==================================================================
