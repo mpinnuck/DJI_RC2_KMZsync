@@ -9,7 +9,7 @@ Backend selection matrix:
     --------------|----------------------|------------------
     mtp:...       | WindowsMTPBackend    | MacMTPBackend
     adb:...       | WindowsADBBackend    | MacADBBackend
-    (no prefix)   | UnsupportedBackendError (RC-2 is Android, not a local path)
+    (invalid path)| UnavailableRCBackend
 
 PCBackend is always a single concrete class -- Python stdlib handles
 Windows/macOS filesystem differences transparently.
@@ -25,6 +25,7 @@ from backends.mtp.mac_mtp_backend import MacMTPBackend
 from backends.mtp.windows_mtp_backend import WindowsMTPBackend
 from backends.pc.pc_backend import PCBackend
 from backends.rc_backend import RCBackend
+from backends.unavailable_rc_backend import UnavailableRCBackend
 from config.config_manager import ConfigManager
 
 
@@ -45,19 +46,18 @@ class BackendFactory:
     def create_rc(path: str, config: ConfigManager) -> RCBackend:
         """
         Return a concrete RCBackend for the given RC-2 root path.
-
-        Raises UnsupportedBackendError if the path scheme is not supported
-        on the current platform (e.g. mtp: on macOS).
         """
         cleaned = (path or "").strip()
         is_windows = os.name == "nt"
 
-        if cleaned.lower().startswith("mtp:"):
+        scheme = BackendFactory.path_scheme(cleaned)
+
+        if scheme == "mtp":
             if not is_windows:
                 return MacMTPBackend(config)
             return WindowsMTPBackend(config)
 
-        if cleaned.lower().startswith("adb:"):
+        if scheme == "adb":
             if is_windows:
                 return WindowsADBBackend(config)
             return MacADBBackend(config)
@@ -71,11 +71,21 @@ class BackendFactory:
 
         # Non-empty path with no recognised protocol prefix.
         # RC-2 is an Android device; bare filesystem paths are not valid roots.
-        raise UnsupportedBackendError(
+        return UnavailableRCBackend(
             "RC-2 path must use the 'mtp:' prefix (Windows) or 'adb:' prefix. "
             "A bare filesystem path is not valid — RC-2 is an Android device. "
             f"Got: {cleaned!r}"
         )
+
+    @staticmethod
+    def path_scheme(path: str) -> str:
+        cleaned = (path or "").strip()
+        if not cleaned:
+            return ""
+        sep = cleaned.find(":")
+        if sep <= 0:
+            return ""
+        return cleaned[:sep].strip().lower()
 
     @staticmethod
     def create_pc(config: ConfigManager) -> PCBackend:
@@ -86,14 +96,3 @@ class BackendFactory:
         stdlib (os, shutil) abstracts platform path differences.
         """
         return PCBackend(config)
-
-    @staticmethod
-    def create_both(
-        config: ConfigManager,
-    ) -> tuple[RCBackend, PCBackend]:
-        """
-        Convenience method -- returns (rc_backend, pc_backend) in one call.
-        """
-        rc = BackendFactory.create_rc(config.rc2_folder, config)
-        pc = BackendFactory.create_pc(config)
-        return rc, pc

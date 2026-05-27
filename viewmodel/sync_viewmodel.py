@@ -18,98 +18,10 @@ try:
 except ImportError:
     Image = None
 
-from backends.backend_factory import BackendFactory, UnsupportedBackendError
-from backends.rc_backend import RCBackend
+from backends.backend_factory import BackendFactory
 from config.config_manager import ConfigManager, get_runtime_base_dir
 from model.kmz_file import KMZFile
 from model.rc2_mission import RC2Mission
-
-
-class _UnavailableRCBackend(RCBackend):
-    """RC backend that reports a fixed unsupported-backend error."""
-
-    def __init__(self, message: str) -> None:
-        self._message = (message or "Requested RC backend is unavailable.").strip()
-
-    def is_connected(self, timeout_seconds: int | None = None) -> bool:
-        return False
-
-    def get_connection_mode(self) -> str:
-        return "Unavailable"
-
-    def probe_root(self, path: str) -> bool:
-        return False
-
-    def list_missions(self, root: str) -> Tuple[List[RC2Mission], str | None]:
-        return [], self._message
-
-    def list_slot_files(self, mission: RC2Mission) -> Tuple[bool, List[str] | str]:
-        return False, self._message
-
-    def list_folder_items(
-        self, path: str
-    ) -> Tuple[bool, List[Tuple[str, bool, str]] | str]:
-        return False, self._message
-
-    def read_file_bytes(
-        self, mission: RC2Mission, filename: str
-    ) -> Tuple[bool, bytes | str]:
-        return False, self._message
-
-    def read_file_bytes_from_path(
-        self, folder: str, filename: str
-    ) -> Tuple[bool, bytes | str]:
-        return False, self._message
-
-    def delete_file(self, mission: RC2Mission, filename: str) -> Tuple[bool, str]:
-        return False, self._message
-
-    def copy_file_to_device(
-        self,
-        dest_folder: str,
-        local_source_path: str,
-        dest_filename: str,
-    ) -> Tuple[bool, str]:
-        return False, self._message
-
-    def write_text_file(
-        self,
-        dest_folder: str,
-        filename: str,
-        content: str,
-    ) -> Tuple[bool, str]:
-        return False, self._message
-
-    def copy_file_from_device(
-        self,
-        src_folder: str,
-        filename: str,
-        local_dest_path: str,
-        timeout_seconds: int | None = None,
-    ) -> Tuple[bool, str]:
-        return False, self._message
-
-    def create_slot_folder(self, root: str, guid: str) -> Tuple[bool, str]:
-        return False, self._message
-
-    def delete_mission(self, mission: RC2Mission) -> Tuple[bool, str]:
-        return False, self._message
-
-    def get_preview_path(
-        self,
-        root: str,
-        guid: str,
-        copy_timeout_seconds: int | None = None,
-        list_timeout_seconds: int | None = None,
-        allow_live_fetch: bool = True,
-    ) -> str | None:
-        return None
-
-    def clear_preview_cache(self, root: str) -> None:
-        return None
-
-    def get_status(self) -> Tuple[bool, str]:
-        return False, self._message
 
 
 class SyncViewModel:
@@ -127,6 +39,17 @@ class SyncViewModel:
     MTP_VERIFY_TIMEOUT_SECONDS = 5
     MTP_SIZE_TOLERANCE_PERCENT = 10.0
     MTP_SIZE_TOLERANCE_BYTES = 4096
+    DEEP_INSPECT_TIME_BUDGET_SECONDS_MTP = 8.0
+    DEEP_INSPECT_MAX_DEPTH_MTP = 1
+    DEEP_INSPECT_MAX_FOLDERS_MTP = 24
+    DEEP_INSPECT_MAX_SCAN_FOLDERS_MTP = 10
+    DEEP_INSPECT_MAX_FILE_READS_MTP = 16
+    DEEP_INSPECT_FOLDER_HINT_TOKENS = (
+        "history", "record", "mission", "meta", "index", "db", "database", "sqlite",
+    )
+    DEEP_INSPECT_FOLDER_SKIP_TOKENS = (
+        "mediacache", "media_cache", "cachevideo", "video", "thumb", "thumbnail", "image",
+    )
     COPY_MAP_FILE = "kmz_copy_map.json"
 
     def __init__(self, config: ConfigManager, copy_map_path: str | None = None):
@@ -135,7 +58,7 @@ class SyncViewModel:
         self._preview_timestamp_cache: dict[str, str] = {}  # guid → device ModifyDate string
         self._preview_timestamps_loaded: bool = False
         self._mtp_operation_lock = threading.Lock()
-        self._rc_backend = self._create_rc_backend(config.rc2_folder)
+        self._rc_backend = BackendFactory.create_rc(config.rc2_folder, self._config)
         self._pc_backend = BackendFactory.create_pc(config)
         if copy_map_path:
             self._copy_map_path = copy_map_path
@@ -164,26 +87,6 @@ class SyncViewModel:
         if os.path.isfile(self._copy_map_path):
             return
         self._save_copy_map(self._default_copy_map_payload())
-
-    def _create_rc_backend(self, path: str):
-        """
-        Build the RC backend for *path*, falling back to a disconnected ADB
-        backend when the path uses no recognised protocol prefix.
-        """
-        cleaned = (path or "").strip()
-        try:
-            return BackendFactory.create_rc(path, self._config)
-        except UnsupportedBackendError as exc:
-            # If the user explicitly selected a protocol path that is not
-            # supported on this platform (e.g. mtp: on macOS), preserve that
-            # error rather than masking it as an ADB offline issue.
-            if self._is_adb_path(cleaned) or self._is_mtp_path(cleaned):
-                return _UnavailableRCBackend(str(exc))
-
-            # Path is not a recognised device protocol (e.g. a bare filesystem
-            # path entered before the adb:/mtp: prefix was configured).  Keep a
-            # disconnected ADB backend so connectivity checks return False cleanly.
-            return BackendFactory.create_rc("", self._config)
 
     def _load_copy_map(self) -> dict[str, Any]:
         if not os.path.isfile(self._copy_map_path):
@@ -279,13 +182,8 @@ class SyncViewModel:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    @staticmethod
-    def _is_adb_path(path: str) -> bool:
-        return path.strip().lower().startswith("adb:")
-
-    @staticmethod
-    def _is_mtp_path(path: str) -> bool:
-        return path.strip().lower().startswith("mtp:")
+    def _is_device_backend_active(self) -> bool:
+        return self._rc_backend.get_connection_mode().strip().upper() in {"MTP", "ADB"}
 
     @staticmethod
     def _adb_remote_root(path: str) -> str:
@@ -839,101 +737,15 @@ if ($result.Count -gt 0) { @($result) | ConvertTo-Json -Compress }
         if not root:
             return None
 
-        if self._is_mtp_path(root):
-            if os.name != "nt":
-                # macOS: native MTP — delegate to the platform backend.
-                return self._rc_backend.get_preview_path(
-                    root, guid,
-                    copy_timeout_seconds=copy_timeout_seconds,
-                    list_timeout_seconds=list_timeout_seconds,
-                    allow_live_fetch=allow_live_fetch,
-                )
-
-            cache_base = self._preview_cache_path(root, guid)
-
-            # Load persisted timestamps once per session so restarts are fast.
-            self._load_preview_timestamps(root)
-
-            # One bulk PowerShell call lists map_preview/ AND all its
-            # subfolders, covering all missions.  Shared across all missions
-            # in this refresh cycle via _mtp_preview_bulk_cache.
-            preview_folder = self._mtp_join(root, "map_preview")
-            ok_bulk, bulk_info = self._list_mtp_preview_bulk(
-                preview_folder,
-                timeout_seconds=list_timeout_seconds,
-            )
-
-            # Listing failed — fall back to disk cache without timestamp check.
-            if not ok_bulk:
-                return self._find_usable_cached_preview(cache_base, guid)
-
-            entry = bulk_info.get(guid.upper())
-
-            # No preview on device; return disk cache if we have one.
-            if not entry:
-                return self._find_usable_cached_preview(cache_base, guid)
-
-            preview_name = entry["preview_name"]
-            parent_name = entry["parent_name"]
-            device_ts = entry["device_ts"]
-            source_folder = (
-                self._mtp_join(preview_folder, parent_name)
-                if parent_name else preview_folder
-            )
-
-            # Return disk cache immediately when timestamp is unchanged (or
-            # unavailable — e.g. device returns empty string for this field).
-            cached = self._find_usable_cached_preview(cache_base, guid)
-            cached_ts = self._preview_timestamp_cache.get(guid, "")
-            if cached and (not device_ts or device_ts == cached_ts):
-                return cached
-
-            if not allow_live_fetch:
-                return cached  # Stale but can't re-fetch; return what we have.
-
-            # Cache is absent or device timestamp is newer; copy fresh from device.
-            if cached:
-                try:
-                    os.remove(cached)
-                except OSError:
-                    pass
-
-            return self._fetch_and_cache_preview(
-                root=root,
-                guid=guid,
-                source_folder=source_folder,
-                preview_name=preview_name,
-                device_ts=device_ts,
-                copy_timeout_seconds=copy_timeout_seconds,
-                cache_base=cache_base,
-            )
-
-        if self._is_adb_path(root):
-            return self._rc_backend.get_preview_path(
-                root, guid,
-                copy_timeout_seconds=copy_timeout_seconds,
-                list_timeout_seconds=list_timeout_seconds,
-                allow_live_fetch=allow_live_fetch,
-            )
-
-        preview_dir = os.path.join(root, "map_preview")
-        if not os.path.isdir(preview_dir):
+        if not self._is_device_backend_active():
             return None
 
-        for candidate in self._preview_name_candidates(guid):
-            preview_path = os.path.join(preview_dir, candidate)
-            if os.path.isfile(preview_path):
-                return preview_path
-
-        nested_preview_dir = self._find_case_insensitive_child_dir(preview_dir, guid)
-        if not nested_preview_dir:
-            return None
-
-        for candidate in self._preview_name_candidates(guid):
-            preview_path = os.path.join(nested_preview_dir, candidate)
-            if os.path.isfile(preview_path):
-                return preview_path
-        return None
+        return self._rc_backend.get_preview_path(
+            root, guid,
+            copy_timeout_seconds=copy_timeout_seconds,
+            list_timeout_seconds=list_timeout_seconds,
+            allow_live_fetch=allow_live_fetch,
+        )
 
     def get_all_mission_preview_paths(
         self,
@@ -950,81 +762,20 @@ if ($result.Count -gt 0) { @($result) | ConvertTo-Json -Compress }
         if not root:
             return {m.guid: None for m in missions}
 
-        if self._is_mtp_path(root):
-            if os.name != "nt":
-                # macOS: native MTP — fetch all previews in a single backend connection.
-                bulk_fetch = getattr(self._rc_backend, "get_preview_paths_bulk", None)
-                if callable(bulk_fetch):
-                    return bulk_fetch(
-                        root,
-                        [m.guid for m in missions],
-                        copy_timeout_seconds=copy_timeout_seconds,
-                        list_timeout_seconds=list_timeout_seconds,
-                    )
-                return {
-                    m.guid: self._rc_backend.get_preview_path(
-                        root, m.guid,
-                        copy_timeout_seconds=copy_timeout_seconds,
-                        list_timeout_seconds=list_timeout_seconds,
-                    )
-                    for m in missions
-                }
+        if not self._is_device_backend_active():
+            return {m.guid: None for m in missions}
 
-            self._load_preview_timestamps(root)
-            preview_folder = self._mtp_join(root, "map_preview")
-            ok_bulk, bulk_info = self._list_mtp_preview_bulk(
-                preview_folder, timeout_seconds=list_timeout_seconds
+        bulk_fetch = getattr(self._rc_backend, "get_preview_paths_bulk", None)
+        if callable(bulk_fetch):
+            return bulk_fetch(
+                root,
+                [m.guid for m in missions],
+                copy_timeout_seconds=copy_timeout_seconds,
+                list_timeout_seconds=list_timeout_seconds,
             )
-
-            result: dict[str, str | None] = {}
-            for mission in missions:
-                guid = mission.guid
-                cache_base = self._preview_cache_path(root, guid)
-
-                if not ok_bulk:
-                    result[guid] = self._find_usable_cached_preview(cache_base, guid)
-                    continue
-
-                entry = bulk_info.get(guid.upper())
-                if not entry:
-                    result[guid] = self._find_usable_cached_preview(cache_base, guid)
-                    continue
-
-                preview_name = entry["preview_name"]
-                parent_name = entry["parent_name"]
-                device_ts = entry["device_ts"]
-                source_folder = (
-                    self._mtp_join(preview_folder, parent_name)
-                    if parent_name else preview_folder
-                )
-
-                cached = self._find_usable_cached_preview(cache_base, guid)
-                cached_ts = self._preview_timestamp_cache.get(guid, "")
-                if cached and (not device_ts or device_ts == cached_ts):
-                    result[guid] = cached
-                    continue
-
-                # Device has a newer image — copy from device.
-                if cached:
-                    try:
-                        os.remove(cached)
-                    except OSError:
-                        pass
-
-                result[guid] = self._fetch_and_cache_preview(
-                    root=root,
-                    guid=guid,
-                    source_folder=source_folder,
-                    preview_name=preview_name,
-                    device_ts=device_ts,
-                    copy_timeout_seconds=copy_timeout_seconds,
-                    cache_base=cache_base,
-                )
-            return result
-
-        # ADB / local filesystem — fall back to individual lookups.
         return {
-            m.guid: self.get_mission_preview_path(
+            m.guid: self._rc_backend.get_preview_path(
+                root,
                 m.guid,
                 copy_timeout_seconds=copy_timeout_seconds,
                 list_timeout_seconds=list_timeout_seconds,
@@ -1094,7 +845,7 @@ if ($devices) {
     def diagnose_rc2_connection(self) -> Tuple[bool, str, str | None]:
         root = (self._config.rc2_folder or "").strip()
 
-        if root and not self._is_adb_path(root) and not self._is_mtp_path(root) and os.path.isdir(root):
+        if root and BackendFactory.path_scheme(root) not in {"adb", "mtp"} and os.path.isdir(root):
             return True, f"RC-2 folder is reachable on disk: {root}", root
 
         mtp_root = self._detect_mtp_rc2_folder()
@@ -1172,13 +923,13 @@ if ($devices) {
     def set_rc2_folder(self, path: str) -> None:
         cleaned = path.strip()
         old_backend = self._rc_backend
-        if self._is_adb_path(cleaned) or self._is_mtp_path(cleaned):
+        if BackendFactory.path_scheme(cleaned) in {"adb", "mtp"}:
             self._config.rc2_folder = cleaned
         else:
             self._config.rc2_folder = os.path.normpath(cleaned)
         self._preview_timestamp_cache.clear()
         self._preview_timestamps_loaded = False
-        self._rc_backend = self._create_rc_backend(cleaned)
+        self._rc_backend = BackendFactory.create_rc(cleaned, self._config)
         close_old = getattr(old_backend, "close", None)
         if callable(close_old):
             try:
@@ -1406,243 +1157,101 @@ if ($devices) {
     def _read_slot_file_bytes(self, mission: RC2Mission, filename: str) -> Tuple[bool, bytes | str]:
         return self._rc_backend.read_file_bytes(mission, filename)
 
-    @classmethod
-    def _mtp_parent_path(cls, mtp_path: str, levels: int = 1) -> str | None:
-        if not cls._is_mtp_path(mtp_path):
-            return None
-        segments = cls._mtp_segments(mtp_path)
-        if len(segments) <= levels:
-            return None
-        parent_segments = segments[:-levels]
-        return "mtp:" + "|".join(parent_segments)
-
     def _list_folder_items_with_type(self, folder_path: str) -> Tuple[bool, List[Tuple[str, bool, str]] | str]:
-        root = (self._config.rc2_folder or "").strip()
+        if not self._is_device_backend_active():
+            return False, "RC-2 backend is not active. Waiting for device detection."
 
-        if self._is_mtp_path(root) or self._is_adb_path(root):
-            return self._rc_backend.list_folder_items(folder_path)
-
-        if not os.path.isdir(folder_path):
-            return False, f"Folder not found: {folder_path}"
-
-        try:
-            output = []
-            for entry in os.scandir(folder_path):
-                modified = ""
-                if not entry.is_dir():
-                    try:
-                        modified = self._format_display_datetime(datetime.fromtimestamp(entry.stat().st_mtime))
-                    except OSError:
-                        modified = ""
-                output.append((entry.name, entry.is_dir(), modified))
-        except OSError as e:
-            return False, str(e)
-        return True, output
+        return self._rc_backend.list_folder_items(folder_path)
 
     def _read_file_bytes_from_folder(self, folder_path: str, filename: str) -> Tuple[bool, bytes | str]:
-        root = (self._config.rc2_folder or "").strip()
+        if not self._is_device_backend_active():
+            return False, "RC-2 backend is not active. Waiting for device detection."
 
-        if self._is_mtp_path(root) or self._is_adb_path(root):
-            return self._rc_backend.read_file_bytes_from_path(folder_path, filename)
+        return self._rc_backend.read_file_bytes_from_path(folder_path, filename)
 
-        local_file = os.path.join(folder_path, filename)
-        try:
-            with open(local_file, "rb") as fh:
-                return True, fh.read()
-        except OSError as e:
-            return False, str(e)
+    def _expand_inspect_folders(
+        self,
+        seeds: List[str],
+        max_depth: int = 2,
+        max_folders: int = 80,
+        max_listings: int = 40,
+        deadline: float | None = None,
+        include_tokens: Tuple[str, ...] | None = None,
+        skip_tokens: Tuple[str, ...] | None = None,
+    ) -> List[str]:
+        seen: set[str] = set()
+        ordered: List[str] = []
+        queue_items: List[Tuple[str, int]] = []
+        listing_count = 0
+
+        for path in seeds:
+            cleaned = (path or "").strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            ordered.append(cleaned)
+            queue_items.append((cleaned, 0))
+
+        index = 0
+        while index < len(queue_items) and len(ordered) < max_folders:
+            if deadline is not None and time.monotonic() > deadline:
+                break
+            if listing_count >= max_listings:
+                break
+            folder, depth = queue_items[index]
+            index += 1
+            if depth >= max_depth:
+                continue
+
+            ok, listed = self._list_folder_items_with_type(folder)
+            listing_count += 1
+            if not ok:
+                continue
+
+            items = listed if isinstance(listed, list) else []
+            for name, is_folder, _ in items:
+                if not is_folder:
+                    continue
+                lowered = name.lower()
+                if skip_tokens and any(token in lowered for token in skip_tokens):
+                    continue
+                if include_tokens and not any(token in lowered for token in include_tokens):
+                    continue
+                child = self._rc_backend.join_folder_path(folder, name)
+                if child in seen:
+                    continue
+                seen.add(child)
+                ordered.append(child)
+                if len(ordered) >= max_folders:
+                    break
+                queue_items.append((child, depth + 1))
+
+        return ordered
 
     def _inspect_metadata_history_candidates(self, mission: RC2Mission, kmz_name: str) -> List[str]:
-        lines: List[str] = []
-        root = (self._config.rc2_folder or "").strip()
-        candidates: List[str] = []
-
-        if self._is_mtp_path(root):
-            candidates.append(root)
-            parent_files = self._mtp_parent_path(root, levels=1)
-            parent_app = self._mtp_parent_path(root, levels=2)
-            if parent_files:
-                candidates.append(parent_files)
-                ok, items = self._list_folder_items_with_type(parent_files)
-                if ok and isinstance(items, list):
-                    for name, is_folder, _ in items:
-                        lowered = name.lower()
-                        if is_folder and any(token in lowered for token in ("history", "record", "mission", "meta", "index", "cache")):
-                            candidates.append(self._mtp_join(parent_files, name))
-            if parent_app:
-                candidates.append(parent_app)
-        elif self._is_adb_path(root):
-            remote_root = self._adb_remote_root(root)
-            candidates.append(remote_root)
-            if "/" in remote_root:
-                parent_files = remote_root.rsplit("/", 1)[0]
-                candidates.append(parent_files)
-                if "/" in parent_files:
-                    candidates.append(parent_files.rsplit("/", 1)[0])
-        else:
-            candidates.append(root)
-            if os.path.isdir(root):
-                parent_files = os.path.dirname(root)
-                candidates.append(parent_files)
-                for name in os.listdir(parent_files) if os.path.isdir(parent_files) else []:
-                    lowered = name.lower()
-                    full = os.path.join(parent_files, name)
-                    if os.path.isdir(full) and any(token in lowered for token in ("history", "record", "mission", "meta", "index", "cache")):
-                        candidates.append(full)
-
-        seen: set[str] = set()
-        unique_candidates: List[str] = []
-        for path in candidates:
-            if not path or path in seen:
-                continue
-            seen.add(path)
-            unique_candidates.append(path)
-
-        lines.append("Metadata/history probe:")
-        lines.append(f"Candidate folders: {len(unique_candidates)}")
-
-        targets = [mission.guid.lower(), kmz_name.lower()]
-        checked_files = 0
-        hits: List[str] = []
-        meta_exts = (".json", ".txt", ".xml", ".db", ".sqlite")
-
-        for folder in unique_candidates[:8]:
-            ok, listed = self._list_folder_items_with_type(folder)
-            if not ok:
-                continue
-            items = listed if isinstance(listed, list) else []
-            files = [(name, modified) for name, is_folder, modified in items if not is_folder]
-            interesting = [
-                (name, modified) for name, modified in files
-                if name.lower().endswith(meta_exts)
-                or any(token in name.lower() for token in ("history", "mission", "meta", "index", "title", "record"))
-            ]
-
-            if interesting:
-                preview = [
-                    f"{name} [{modified or 'Unknown'}]"
-                    for name, modified in interesting[:8]
-                ]
-                lines.append(f"- {folder}: {', '.join(preview)}{' ...' if len(interesting) > 8 else ''}")
-
-            for filename, modified in interesting[:10]:
-                checked_files += 1
-                ok_bytes, payload = self._read_file_bytes_from_folder(folder, filename)
-                if not ok_bytes or not isinstance(payload, bytes):
-                    continue
-
-                if filename.lower().endswith((".db", ".sqlite")):
-                    # Binary DBs are reported as candidates; we don't parse them inline.
-                    continue
-
-                text = ""
-                for encoding in ("utf-8", "utf-16", "latin-1"):
-                    try:
-                        text = payload.decode(encoding, errors="strict")
-                        break
-                    except UnicodeDecodeError:
-                        continue
-
-                if not text:
-                    continue
-
-                lowered = text.lower()
-                if any(target in lowered for target in targets if target):
-                    hits.append(f"{folder} | {filename} [{modified or 'Unknown'}]")
-
-        lines.append(f"Metadata files checked: {checked_files}")
-        if hits:
-            dedup_hits = []
-            seen_hits = set()
-            for hit in hits:
-                if hit in seen_hits:
-                    continue
-                seen_hits.add(hit)
-                dedup_hits.append(hit)
-            lines.append("GUID/KMZ references found in:")
-            for hit in dedup_hits[:12]:
-                lines.append(f"  * {hit}")
-        else:
-            lines.append("No GUID/KMZ references found in inspected text metadata files.")
-            lines.append("Likely source is a binary DJI app database/index not directly readable via this path.")
-
-        return lines
+        return self._rc_backend.inspect_metadata_history_candidates(
+            mission,
+            kmz_name,
+            time_budget_seconds_mtp=self.DEEP_INSPECT_TIME_BUDGET_SECONDS_MTP,
+            max_depth_mtp=self.DEEP_INSPECT_MAX_DEPTH_MTP,
+            max_folders_mtp=self.DEEP_INSPECT_MAX_FOLDERS_MTP,
+            max_scan_folders_mtp=self.DEEP_INSPECT_MAX_SCAN_FOLDERS_MTP,
+            max_file_reads_mtp=self.DEEP_INSPECT_MAX_FILE_READS_MTP,
+            folder_hint_tokens=self.DEEP_INSPECT_FOLDER_HINT_TOKENS,
+            folder_skip_tokens=self.DEEP_INSPECT_FOLDER_SKIP_TOKENS,
+        )
 
     def _inspect_binary_metadata_candidates(self, mission: RC2Mission, kmz_name: str) -> List[str]:
-        lines: List[str] = []
-        root = (self._config.rc2_folder or "").strip()
-        candidates: List[str] = []
-
-        def add_candidate(path: str | None) -> None:
-            cleaned = (path or "").strip()
-            if cleaned:
-                candidates.append(cleaned)
-
-        if self._is_mtp_path(root):
-            add_candidate(root)
-            add_candidate(self._mtp_parent_path(root, levels=1))
-            add_candidate(self._mtp_parent_path(root, levels=2))
-        elif self._is_adb_path(root):
-            remote_root = self._adb_remote_root(root)
-            add_candidate(remote_root)
-            if "/" in remote_root:
-                parent_files = remote_root.rsplit("/", 1)[0]
-                add_candidate(parent_files)
-                if "/" in parent_files:
-                    add_candidate(parent_files.rsplit("/", 1)[0])
-        else:
-            add_candidate(root)
-            if os.path.isdir(root):
-                add_candidate(os.path.dirname(root))
-
-        seen: set[str] = set()
-        unique_candidates: List[str] = []
-        for path in candidates:
-            if not path or path in seen:
-                continue
-            seen.add(path)
-            unique_candidates.append(path)
-
-        lines.append("Binary metadata/index search:")
-        lines.append(f"Candidate folders: {len(unique_candidates)}")
-
-        meta_exts = (".db", ".sqlite", ".sqlite3", ".db3", ".dat", ".idx", ".bin")
-        name_tokens = ("database", "index", "metadata", "mission", "history", "record", "cache", "dji")
-        hits: List[str] = []
-
-        for folder in unique_candidates[:8]:
-            ok, listed = self._list_folder_items_with_type(folder)
-            if not ok:
-                continue
-
-            items = listed if isinstance(listed, list) else []
-            matches = [
-                (name, modified) for name, is_folder, modified in items
-                if not is_folder and (
-                    name.lower().endswith(meta_exts)
-                    or any(token in name.lower() for token in name_tokens)
-                )
-            ]
-
-            if matches:
-                preview = [
-                    f"{name} [{modified or 'Unknown'}]"
-                    for name, modified in matches[:8]
-                ]
-                lines.append(f"- {folder}: {', '.join(preview)}{' ...' if len(matches) > 8 else ''}")
-
-            for name, modified in matches[:10]:
-                hits.append(f"{folder} | {name} [{modified or 'Unknown'}]")
-
-        if hits:
-            lines.append(f"Best candidate: {hits[0]}")
-            lines.append("Potential binary metadata/index files:")
-            for hit in hits[:12]:
-                lines.append(f"  * {hit}")
-        else:
-            lines.append("No obvious binary database/index filenames found in candidate folders.")
-
-        return lines
+        return self._rc_backend.inspect_binary_metadata_candidates(
+            mission,
+            kmz_name,
+            time_budget_seconds_mtp=self.DEEP_INSPECT_TIME_BUDGET_SECONDS_MTP,
+            max_depth_mtp=self.DEEP_INSPECT_MAX_DEPTH_MTP,
+            max_folders_mtp=self.DEEP_INSPECT_MAX_FOLDERS_MTP,
+            max_scan_folders_mtp=self.DEEP_INSPECT_MAX_SCAN_FOLDERS_MTP,
+            folder_hint_tokens=self.DEEP_INSPECT_FOLDER_HINT_TOKENS,
+            folder_skip_tokens=self.DEEP_INSPECT_FOLDER_SKIP_TOKENS,
+        )
 
     @staticmethod
     def _extract_name_like_fields_from_text(text: str) -> List[str]:
@@ -1660,6 +1269,11 @@ if ($devices) {
                 if len(found) >= 20:
                     return found
         return found
+
+    @staticmethod
+    def _count_waypoints_in_text(text: str) -> int:
+        # DJI KMZ route points are represented as Placemark entries in KML/WPML.
+        return len(re.findall(r"<\s*Placemark\b", text, flags=re.IGNORECASE))
 
     def inspect_mission_storage(self, mission: RC2Mission, deep: bool = False) -> Tuple[bool, str]:
         lines: List[str] = []
@@ -1702,6 +1316,7 @@ if ($devices) {
                 ]
 
                 discovered_names: List[str] = []
+                waypoint_count = 0
                 for name in xml_entries[:8]:
                     raw = archive.read(name)
                     text = ""
@@ -1713,11 +1328,14 @@ if ($devices) {
                             continue
                     if not text:
                         continue
+                    waypoint_count += self._count_waypoints_in_text(text)
                     for value in self._extract_name_like_fields_from_text(text):
                         if value not in discovered_names:
                             discovered_names.append(value)
                         if len(discovered_names) >= 20:
                             break
+
+                lines.append(f"Waypoint count (Placemark): {waypoint_count}")
 
                 if discovered_names:
                     preview = ", ".join(discovered_names[:10])

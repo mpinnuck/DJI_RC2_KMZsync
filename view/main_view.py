@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v2.1"
+_APP_VERSION = "v3.0"
 
 
 try:
@@ -46,6 +46,7 @@ _FONT_BODY  = ("Segoe UI", 10)
 _FONT_BOLD  = ("Segoe UI", 10, "bold")
 _FONT_TITLE = ("Segoe UI", 11, "bold")
 _FONT_SMALL = ("Segoe UI", 8)
+_INSPECT_TIMEOUT_SECONDS = 45
 
 
 class MainView:
@@ -67,6 +68,7 @@ class MainView:
         self._preview_popup_label: tk.Label | None = None
         self._preview_popup_image: tk.PhotoImage | None = None
         self._preview_popup_resize_after_id: str | None = None
+        self._inspect_popup: tk.Toplevel | None = None
         self._refresh_queue: queue.Queue = queue.Queue()
         self._copy_queue: queue.Queue = queue.Queue()
         self._inspect_queue: queue.Queue = queue.Queue()
@@ -93,6 +95,9 @@ class MainView:
         self._busy_popup_progress: ttk.Progressbar | None = None
         self._copy_in_progress = False
         self._inspect_in_progress = False
+        self._inspect_request_id = 0
+        self._inspect_watchdog_after_id: str | None = None
+        self._inspect_started_at = 0.0
         self._delete_in_progress = False
         self._force_mapping_rerender_on_next_refresh_done = False
         self._refresh_pending = False
@@ -132,6 +137,14 @@ class MainView:
         self._flush_path_entries()
         if self._preview_popup is not None and self._preview_popup.winfo_exists():
             self._preview_popup.destroy()
+        if self._inspect_popup is not None and self._inspect_popup.winfo_exists():
+            self._inspect_popup.destroy()
+        if self._inspect_watchdog_after_id is not None:
+            try:
+                self._root.after_cancel(self._inspect_watchdog_after_id)
+            except Exception:
+                pass
+            self._inspect_watchdog_after_id = None
         self._hide_busy_popup()
         try:
             self._vm.shutdown()
@@ -357,12 +370,12 @@ class MainView:
         ).pack(side=tk.RIGHT, padx=(0, 6))
         ttk.Button(
             log_header,
-            text="Deep Inspect",
+            text="Inspect + Metadata",
             command=lambda: self._inspect_selected_mission(deep=True),
         ).pack(side=tk.RIGHT, padx=(0, 6))
         ttk.Button(
             log_header,
-            text="Quick Inspect",
+            text="Inspect KMZ",
             command=lambda: self._inspect_selected_mission(deep=False),
         ).pack(side=tk.RIGHT, padx=(0, 6))
         ttk.Button(log_header, text="Clear Log", command=self._clear_log).pack(side=tk.RIGHT)
@@ -1010,17 +1023,52 @@ class MainView:
             return
 
         self._inspect_in_progress = True
+        self._inspect_request_id += 1
+        request_id = self._inspect_request_id
+        self._inspect_started_at = time.time()
         mode = "Deep" if deep else "Quick"
         self._set_busy(True, f"{mode} inspecting selected mission...")
         self._set_status(f"{mode} inspecting selected mission...", colour=_TEXT_DIM)
         self._log(f"{mode} inspect mission requested for mission {mission.guid}", level="INFO")
 
         def _worker() -> None:
-            ok, details = self._vm.inspect_mission_storage(mission, deep=deep)
-            self._inspect_queue.put((ok, details))
+            try:
+                ok, details = self._vm.inspect_mission_storage(mission, deep=deep)
+            except Exception:
+                ok = False
+                details = "Inspect failed with an unexpected error:\n" + traceback.format_exc()
+            self._inspect_queue.put((ok, details, deep, request_id))
 
         threading.Thread(target=_worker, daemon=True).start()
+        if self._inspect_watchdog_after_id is not None:
+            try:
+                self._root.after_cancel(self._inspect_watchdog_after_id)
+            except Exception:
+                pass
+        self._inspect_watchdog_after_id = self._root.after(500, self._inspect_watchdog)
         self._root.after(50, self._drain_inspect_queue)
+
+    def _inspect_watchdog(self) -> None:
+        if not self._inspect_in_progress:
+            self._inspect_watchdog_after_id = None
+            return
+
+        age_seconds = time.time() - self._inspect_started_at
+        if age_seconds >= _INSPECT_TIMEOUT_SECONDS:
+            # Invalidate any eventual late result from the hanging worker.
+            self._inspect_request_id += 1
+            self._inspect_in_progress = False
+            self._inspect_started_at = 0.0
+            self._set_busy(False, "")
+            self._set_status("Inspect timed out. Try Quick Inspect or reconnect RC-2.", colour=_ERROR)
+            self._log(
+                f"Inspect timed out after {int(age_seconds)}s. Backend operation appears blocked.",
+                level="ERROR",
+            )
+            self._inspect_watchdog_after_id = None
+            return
+
+        self._inspect_watchdog_after_id = self._root.after(500, self._inspect_watchdog)
 
     def _drain_inspect_queue(self) -> None:
         latest = None
@@ -1035,11 +1083,108 @@ class MainView:
                 self._root.after(50, self._drain_inspect_queue)
             return
 
-        ok, details = latest
+        if len(latest) >= 4:
+            ok, details, deep, request_id = latest
+        elif len(latest) >= 3:
+            ok, details, deep = latest
+            request_id = self._inspect_request_id
+        else:
+            ok, details = latest
+            deep = False
+
+        if request_id != self._inspect_request_id:
+            return
+
         self._inspect_in_progress = False
+        self._inspect_started_at = 0.0
+        if self._inspect_watchdog_after_id is not None:
+            try:
+                self._root.after_cancel(self._inspect_watchdog_after_id)
+            except Exception:
+                pass
+            self._inspect_watchdog_after_id = None
         self._set_busy(False, "")
+        self._show_inspect_report(details, ok=ok, deep=deep)
         self._log(details, level="OK" if ok else "ERROR")
         self._set_status("Mission inspection complete." if ok else "Mission inspection failed.", colour=_SUCCESS if ok else _ERROR)
+
+    def _show_inspect_report(self, details: str, ok: bool, deep: bool) -> None:
+        title_mode = "Inspect + Metadata" if deep else "Inspect KMZ"
+        status = "OK" if ok else "Failed"
+        title = f"{title_mode} Report ({status})"
+        try:
+            if self._inspect_popup is not None and self._inspect_popup.winfo_exists():
+                self._inspect_popup.destroy()
+
+            popup = tk.Toplevel(self._root)
+            self._inspect_popup = popup
+            popup.title(title)
+            popup.configure(bg=_PANEL_BG)
+            popup.transient(self._root)
+            popup.geometry("920x620")
+            popup.minsize(640, 420)
+            popup.protocol("WM_DELETE_WINDOW", self._close_inspect_popup)
+
+            header = tk.Frame(popup, bg=_PANEL_BG)
+            header.pack(fill=tk.X, padx=10, pady=(10, 6))
+
+            tk.Label(
+                header,
+                text=title,
+                bg=_PANEL_BG,
+                fg=_SUCCESS if ok else _ERROR,
+                font=_FONT_TITLE,
+                anchor=tk.W,
+            ).pack(side=tk.LEFT)
+
+            def _copy_report() -> None:
+                try:
+                    self._root.clipboard_clear()
+                    self._root.clipboard_append(details)
+                    self._set_status("Inspect report copied to clipboard.", colour=_SUCCESS)
+                except Exception:
+                    self._set_status("Failed to copy inspect report.", colour=_ERROR)
+
+            ttk.Button(header, text="Copy Report", command=_copy_report).pack(side=tk.RIGHT)
+
+            body = tk.Frame(popup, bg=_PANEL_BG)
+            body.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+            text = tk.Text(
+                body,
+                wrap="word",
+                bg=_LOG_BG,
+                fg=_TEXT,
+                relief="flat",
+                borderwidth=0,
+                font=_FONT_SMALL,
+            )
+            scroll = ttk.Scrollbar(body, orient="vertical", command=text.yview)
+            text.configure(yscrollcommand=scroll.set)
+            text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+            text.insert("1.0", details)
+            text.configure(state=tk.DISABLED)
+
+            # Force visibility above the main window on platforms where transient windows
+            # can appear behind or de-focused.
+            popup.deiconify()
+            popup.lift()
+            popup.attributes("-topmost", True)
+            popup.after(150, lambda: popup.attributes("-topmost", False))
+            popup.focus_force()
+        except Exception as exc:
+            self._set_status("Inspect report popup failed; showed fallback dialog.", colour=_ERROR)
+            self._log(f"Inspect popup error: {exc}", level="ERROR")
+            messagebox.showinfo(title, details)
+
+    def _close_inspect_popup(self) -> None:
+        if self._inspect_popup is None:
+            return
+        if self._inspect_popup.winfo_exists():
+            self._inspect_popup.destroy()
+        self._inspect_popup = None
 
     def _detect_rc2(self) -> None:
         self._log("RC-2 detection requested.")
