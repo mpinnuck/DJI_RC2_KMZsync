@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -51,6 +52,8 @@ class SyncViewModel:
         "mediacache", "media_cache", "cachevideo", "video", "thumb", "thumbnail", "image",
     )
     COPY_MAP_FILE = "kmz_copy_map.json"
+    COPY_MAP_FILE_MAC = "kmz_copy_map_m.json"
+    COPY_MAP_FILE_ENV = "DJI_RC2_COPY_MAP_FILE"
 
     def __init__(self, config: ConfigManager, copy_map_path: str | None = None):
         self._config = config
@@ -64,8 +67,17 @@ class SyncViewModel:
             self._copy_map_path = copy_map_path
         else:
             base_dir = get_runtime_base_dir()
-            self._copy_map_path = os.path.join(base_dir, self.COPY_MAP_FILE)
+            self._copy_map_path = os.path.join(base_dir, self._default_copy_map_filename())
         self._ensure_copy_map_exists()
+
+    @classmethod
+    def _default_copy_map_filename(cls) -> str:
+        override = os.environ.get(cls.COPY_MAP_FILE_ENV, "").strip()
+        if override:
+            return override
+        if platform.system().lower() == "darwin":
+            return cls.COPY_MAP_FILE_MAC
+        return cls.COPY_MAP_FILE
 
     @staticmethod
     def _now_iso() -> str:

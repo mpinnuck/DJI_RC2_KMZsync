@@ -1,11 +1,14 @@
 import json
 import logging
 import os
+import platform
 import sys
 
 _logger = logging.getLogger(__name__)
 
 CONFIG_FILE = "kmz_sync_config.json"
+MAC_CONFIG_FILE = "kmz_sync_config_m.json"
+CONFIG_FILE_ENV = "DJI_RC2_CONFIG_FILE"
 
 _DEFAULTS = {
     "rc2_folder": "",
@@ -24,8 +27,17 @@ def get_runtime_base_dir() -> str:
     return os.getcwd()
 
 
+def get_config_filename() -> str:
+    override = os.environ.get(CONFIG_FILE_ENV, "").strip()
+    if override:
+        return override
+    if platform.system().lower() == "darwin":
+        return MAC_CONFIG_FILE
+    return CONFIG_FILE
+
+
 def get_config_file_path() -> str:
-    return os.path.join(get_runtime_base_dir(), CONFIG_FILE)
+    return os.path.join(get_runtime_base_dir(), get_config_filename())
 
 
 class ConfigManager:
