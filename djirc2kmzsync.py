@@ -5,6 +5,7 @@
 # .venv\Scripts\python.exe -m pip install pyinstaller pillow
 # Windows build
 # .venv\Scripts\python.exe -m PyInstaller --noconfirm --clean DJI_RC2_KMZsync_w.spec
+# MAC Build
 # .venvm/bin/python -m PyInstaller --noconfirm --clean --distpath distm DJI_RC2_KMZsync_m.spec
 
 import tkinter as tk

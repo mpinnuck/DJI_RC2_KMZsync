@@ -1,6 +1,6 @@
 # DJI RC-2 KMZ Mission Sync
 
-Desktop utility for syncing Dronelink KMZ missions between PC and DJI RC-2 mission slots.
+Desktop utility for syncing Dronelink KMZ missions between your computer and DJI RC-2 mission slots.
 
 Note: This app and workflow are intended for DJI drones where DJI has not provided a public SDK integration path, such as the Air 3S.
 
@@ -24,17 +24,27 @@ Practical outcome:
 
 ## Platform Support
 
-Supported platforms:
+Fully supported platforms:
 
 - Windows (PyInstaller onedir build via `DJI_RC2_KMZsync_w.spec`)
 - macOS (PyInstaller onedir + `.app` build via `DJI_RC2_KMZsync_m.spec`)
 
 ## Quick Start (60 seconds)
 
+Windows:
+
 ```powershell
 .venv\Scripts\Activate.ps1
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe djirc2kmzsync.py
+```
+
+macOS:
+
+```bash
+source .venvm/bin/activate
+./.venvm/bin/python -m pip install -r requirements.txt
+./.venvm/bin/python djirc2kmzsync.py
 ```
 
 In the app:
@@ -61,7 +71,7 @@ Complete this once before normal use.
   - Save it with a clear name such as Dummy Mission.
   - This slot will be reused as the overwrite target for PC to RC uploads.
 2. Start the RC Sync app.
-  - Connect RC-2 to your PC.
+  - Connect RC-2 to your computer.
   - Launch DJI RC-2 KMZ Mission Sync.
   - Set RC-2 Root and PC KMZ Folder if they are not already set.
   - For Air 3S with Dronelink, point PC KMZ Folder at your Dronelink KMZ export directory.
@@ -87,6 +97,8 @@ How the dummy is used:
 After setup, normal PC to RC copy only requires selecting a PC KMZ and clicking COPY.
 
 ## Build Quick Start
+
+Windows build:
 
 ```powershell
 .venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -128,8 +140,8 @@ After downloading:
 After those two folders are set, normal sync/copy flows are ready to use.
 
 Supported RC-2 access modes:
-- MTP (recommended, Explorer-style)
-- ADB (optional)
+- MTP (recommended; Explorer-style on Windows)
+- ADB (optional, untested)
 - Local filesystem path (when available)
 
 ## Features
@@ -154,7 +166,9 @@ Runtime dependencies:
 Optional tools:
 - ADB in PATH (only required for adb: mode)
 
-The app does not require ADB to run. By default it uses the Windows built-in MTP interface for RC-2 access.
+The app does not require ADB to run.
+- On Windows, it uses the built-in Explorer/Shell MTP interface.
+- On macOS, it uses libmtp/pymtp-based access.
 
 Development/build dependencies:
 - pytest
@@ -162,29 +176,43 @@ Development/build dependencies:
 
 Install dependencies in venv:
 
+Windows:
+
 ```powershell
 .venv\Scripts\Activate.ps1
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe -m pip install pyinstaller
 ```
 
+macOS:
+
+```bash
+source .venvm/bin/activate
+./.venvm/bin/python -m pip install -r requirements.txt
+./.venvm/bin/python -m pip install pyinstaller
+```
+
 ## ADB Setup (optional)
 
-If you plan to use `adb:` RC-2 paths, install Android Platform Tools on Windows.
+If you plan to use `adb:` RC-2 paths, install Android Platform Tools.
+
+Important:
+- The RC-2 must have USB debugging (developer/debug mode) enabled before ADB will connect.
+- ADB support in this app is currently untested and should be treated as experimental.
 
 Why install ADB if it is optional:
 - MTP/Explorer access can be unreliable on some PCs; ADB is a useful fallback path.
 - `adb devices` and `adb shell` provide better diagnostics when RC-2 connectivity is unclear.
 - ADB enables scriptable, repeatable command-line checks/copy operations.
 
-Install with winget:
+Windows install with winget:
 
 ```powershell
 winget search platform-tools
 winget install --id Google.PlatformTools --exact
 ```
 
-Verify ADB installation:
+Verify ADB installation (Windows/macOS):
 
 ```powershell
 adb version
@@ -209,8 +237,16 @@ In the app, you can also use the `ADB Status` button in Activity Log as a quick 
 
 ## Run From Source
 
+Windows:
+
 ```powershell
 .venv\Scripts\python.exe djirc2kmzsync.py
+```
+
+macOS:
+
+```bash
+./.venvm/bin/python djirc2kmzsync.py
 ```
 
 ## Configuration Files
@@ -329,8 +365,16 @@ Use Activity Log actions:
 
 Run all tests:
 
+Windows:
+
 ```powershell
 .venv\Scripts\python.exe -m pytest
+```
+
+macOS:
+
+```bash
+./.venvm/bin/python -m pytest
 ```
 
 ## Notes on Timestamps
