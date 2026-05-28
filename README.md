@@ -24,15 +24,10 @@ Practical outcome:
 
 ## Platform Support
 
-Windows only (supported):
+Supported platforms:
 
-- This app depends on Windows Shell MTP access (Shell.Application via PowerShell).
-- The MTP integration used by this app is a Windows-specific architecture.
-
-macOS (not supported):
-
-- macOS MTP access for RC-2 is not a supported path for this tool.
-- In practice, macOS workflows can require stopping/changing multiple services to get stable MTP access, which is outside the intended setup.
+- Windows (PyInstaller onedir build via `DJI_RC2_KMZsync_w.spec`)
+- macOS (PyInstaller onedir + `.app` build via `DJI_RC2_KMZsync_m.spec`)
 
 ## Quick Start (60 seconds)
 
@@ -94,11 +89,21 @@ After setup, normal PC to RC copy only requires selecting a PC KMZ and clicking 
 ## Build Quick Start
 
 ```powershell
-.venv\Scripts\python.exe -m pip install pyinstaller
-.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean DJI_RC2_KMZsync.spec
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath dist DJI_RC2_KMZsync_w.spec
 ```
 
-Distribute the full dist\DJI_RC2_KMZsync folder (exe + _internal).
+macOS build:
+
+```bash
+./.venvm/bin/python -m pip install -r requirements.txt
+./.venvm/bin/python -m PyInstaller --noconfirm --clean --distpath distm DJI_RC2_KMZsync_m.spec
+```
+
+Distribute:
+
+- Windows: full `dist\DJI_RC2_KMZsync` folder
+- macOS: `distm/DJI_RC2_KMZsync.app` (or `DJI_RC2_KMZsync_macos.zip` from Releases)
 
 ## GitHub Release Builds
 
@@ -142,12 +147,9 @@ Supported RC-2 access modes:
 ## Dependencies
 
 Runtime dependencies:
-- Windows 10/11
+- Windows 10/11 or macOS
 - Python 3.10+ (tested with Python 3.14 in venv)
 - Pillow (mission preview decode)
-
-Platform note:
-- This app is supported on Windows only.
 
 Optional tools:
 - ADB in PATH (only required for adb: mode)
@@ -233,17 +235,15 @@ Example kmz_sync_config.json:
 }
 ```
 
-## Build (PyInstaller, onedir)
+## Build (PyInstaller, Windows and macOS)
 
-The repository includes DJI_RC2_KMZsync.spec configured for onedir output.
-
-Build command:
+Windows:
 
 ```powershell
-.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean DJI_RC2_KMZsync.spec
+.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath dist DJI_RC2_KMZsync_w.spec
 ```
 
-Output folder:
+Windows output:
 
 ```text
 dist\DJI_RC2_KMZsync\
@@ -253,9 +253,24 @@ dist\DJI_RC2_KMZsync\
   kmz_copy_map.json
 ```
 
+macOS:
+
+```bash
+./.venvm/bin/python -m PyInstaller --noconfirm --clean --distpath distm DJI_RC2_KMZsync_m.spec
+```
+
+macOS output:
+
+```text
+distm/
+  DJI_RC2_KMZsync.app
+  DJI_RC2_KMZsync/
+```
+
 Important:
-- Distribute/copy the entire dist\DJI_RC2_KMZsync folder.
-- The exe requires _internal beside it in onedir mode.
+
+- Windows: distribute/copy the entire `dist\DJI_RC2_KMZsync` folder.
+- macOS: distribute `DJI_RC2_KMZsync.app` (or the release zip).
 
 ## Workflow: Add Mission Using Dummy Slot
 
@@ -270,21 +285,29 @@ Use this workflow to push a PC KMZ to RC-2, edit it on the RC, and pull the edit
 7. Click the left COPY button (this will copy the selected PC kmz to the selected RC mission, or to the dummy mission if no RC mission is selected).
 8. Verify success in Activity Log and optional Mission Mapping tab.
 9. On RC-2, open the dummy mission.
-10. The RC will prompt to Select "Adjust and open new mission".
+10. Verify the new mission is loaded correctly.
 11. Apply mission edits (global speed, review altitudes, signal-loss behavior, etc.).
-12. Save the new mission and rename on the RC as needed.
-13. Return to the app and click Refresh.
-14. Identify the newly created RC mission slot:
+12. Return to the mission history list.
+13. Press Save and select "Save As". A new mission will be created.
+14. In the RC UI, rename the new mission as required.
+15. Return to the app and click Refresh.
+16. The newly created mission will be highlighted in light green after the refresh:
   - New GUID rows are highlighted light green for that refresh cycle.
   - On the next refresh, that row returns to normal background.
-  - also the new mission will be associated with a PC kmz, the dummy mission will be associated with the new mission
-15. Click the new mission to view the larger preview image in the right panel.
-16. Double-click the preview image to open a large popup map preview; the popup follows slot selection while open.
-17. Select the target PC KMZ filename to overwrite (or leave none selected for GUID default filename).
-18. Click the right COPY button (copies the updated RC-2 kmz to the PC) to pull the edited mission back.
-19. Confirm the updated file on PC, the new RC mission is now associated the new PC kmz and review mapping timestamp.
-20. In the app, click Restore Dummy, this copies the PC dummy.kmz back to the dummy mission.
-21. On the RC, open the dummy mission, select "Adjust and open" if propted, then return to the RC mission list and click Save for the dummy mission. The cycle is reset and ready for the next new-mission copy.
+17. Click the new mission to view the larger preview image in the right panel.
+18. Double-click the preview image to open a large popup map preview; the popup follows slot selection while open.
+19. Select the new mission target PC KMZ filename to overwrite.
+20. Click the right COPY button (copies the updated RC-2 kmz to the PC) to pull the edited mission back.
+21. Confirm the updated file on PC, the new RC mission is now associated with the new PC kmz, and review mapping timestamp.
+22. In the app, click Restore Dummy. This copies the PC `dummy.kmz` back to the dummy mission.
+23. On the RC, open the dummy mission, select "Adjust and open" if prompted, then return to the RC mission list and click Save for the dummy mission. The cycle is reset and ready for the next new-mission copy.
+
+Preview note:
+
+- On RC-2 you can zoom the waypoint map so the mission occupies the full RC-2 display.
+- Then go back to the history list and press Save to store a new preview image.
+- In KMZ Sync, click the Refresh Preview button above the log to fetch updated previews.
+- The app caches preview images for list-refresh performance.
 
 Dummy slot notes:
 - Left COPY targets the selected RC mission when one is selected.
