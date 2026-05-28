@@ -31,7 +31,15 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import List, Tuple
 
-from backends.rc_backend import RCBackend, _mtp_join, _mtp_segments
+from backends.rc_backend import (
+    RCBackend,
+    _find_cached_preview,
+    _is_usable_preview,
+    _mtp_join,
+    _mtp_segments,
+    _preview_cache_base,
+    _promote_preview,
+)
 from config.config_manager import ConfigManager
 from model.rc2_mission import RC2Mission
 
@@ -114,6 +122,7 @@ class MacMTPBackend(RCBackend):
         self._available: bool = _pymtp is not None
         self._mtp = _pymtp.MTP() if _pymtp is not None else None
         self._connected = False
+        self._prefer_cli_pull = False
         self._connection_lock = threading.RLock()
         # Folder and file listing caches valid for the life of one connection.
         self._folder_cache: list | None = None
@@ -345,6 +354,171 @@ class MacMTPBackend(RCBackend):
     def _raw_connection_mode(self) -> str:
         return "MTP"
 
+    def get_preview_paths_bulk(
+        self,
+        root: str,
+        guids: list[str],
+        copy_timeout_seconds: int | None = None,
+        list_timeout_seconds: int | None = None,
+    ) -> dict[str, str | None]:
+        del copy_timeout_seconds, list_timeout_seconds  # not used by this backend path
+
+        result: dict[str, str | None] = {}
+        missing: list[str] = []
+        for guid in guids:
+            cache_base = _preview_cache_base(root, guid)
+            cached = _find_cached_preview(cache_base, guid)
+            result[guid] = cached
+            if not cached:
+                missing.append(guid)
+
+        if not missing:
+            return result
+
+        preview_folder_path = _mtp_join(root, "map_preview")
+        try:
+            with self._session():
+                preview_folder = self._resolve_folder(preview_folder_path)
+                if preview_folder is None:
+                    return result
+
+                preview_folder_id = int(preview_folder.folder_id)
+                child_folders, child_files = self._child_entries(preview_folder_id)
+
+                top_files_by_name = {
+                    _decode(getattr(entry, "filename", "")).strip().lower(): entry
+                    for entry in child_files
+                }
+                subfolders_by_name = {
+                    _decode(getattr(folder, "name", "")).strip().lower(): folder
+                    for folder in child_folders
+                }
+
+                nested_files_by_guid: dict[str, dict[str, object]] = {}
+                for guid in missing:
+                    folder = subfolders_by_name.get(guid.strip().lower())
+                    if folder is None:
+                        continue
+                    nested_id = int(getattr(folder, "folder_id", -1))
+                    if nested_id < 0:
+                        continue
+                    _, nested_files = self._child_entries(nested_id)
+                    nested_files_by_guid[guid] = {
+                        _decode(getattr(entry, "filename", "")).strip().lower(): entry
+                        for entry in nested_files
+                    }
+
+                selected_entries: dict[str, tuple[int, str]] = {}
+                for guid in missing:
+                    guid_lower = guid.strip().lower()
+                    entry = None
+                    selected_name = ""
+                    for suffix in (".jpg", ".jpeg", ".png"):
+                        candidate_name = f"{guid_lower}{suffix}"
+                        top_match = top_files_by_name.get(candidate_name)
+                        if top_match is not None:
+                            entry = top_match
+                            selected_name = candidate_name
+                            break
+                        nested_map = nested_files_by_guid.get(guid)
+                        if nested_map is not None:
+                            nested_match = nested_map.get(candidate_name)
+                            if nested_match is not None:
+                                entry = nested_match
+                                selected_name = candidate_name
+                                break
+
+                    if entry is None:
+                        result[guid] = None
+                        continue
+
+                    item_id = int(getattr(entry, "item_id", -1))
+                    if item_id < 0:
+                        result[guid] = None
+                        continue
+
+                    selected_entries[guid] = (item_id, selected_name)
+
+                if not selected_entries:
+                    return result
+
+                unresolved: dict[str, tuple[int, str]] = {}
+
+                # First pass: fast in-session pulls via pymtp, one call per preview.
+                for guid, (item_id, selected_name) in selected_entries.items():
+                    cache_base = _preview_cache_base(root, guid)
+                    ext = os.path.splitext(selected_name)[1].lower() or ".jpg"
+                    cache_path = f"{cache_base}{ext}"
+                    temp_path = f"{cache_path}.{os.getpid()}.{guid}.tmp"
+                    try:
+                        direct_ok = False
+                        if not self._prefer_cli_pull:
+                            try:
+                                self._quiet(self._mtp.get_file_to_file, int(item_id), temp_path)
+                                direct_ok = _is_usable_preview(temp_path)
+                            except Exception:
+                                direct_ok = False
+
+                        if direct_ok:
+                            _promote_preview(temp_path, cache_path)
+                            result[guid] = cache_path
+                            continue
+
+                        unresolved[guid] = (item_id, selected_name)
+                    finally:
+                        if os.path.exists(temp_path):
+                            try:
+                                os.remove(temp_path)
+                            except OSError:
+                                pass
+
+                if not unresolved:
+                    self._prefer_cli_pull = False
+                    return result
+
+                # Second pass: one disconnect, batched mtp-getfile pulls, one reconnect.
+                mtp_getfile = shutil.which("mtp-getfile")
+                if not mtp_getfile:
+                    for guid in unresolved:
+                        result[guid] = None
+                    return result
+
+                self._disconnect()
+                any_cli_success = False
+                try:
+                    for guid, (item_id, selected_name) in unresolved.items():
+                        cache_base = _preview_cache_base(root, guid)
+                        ext = os.path.splitext(selected_name)[1].lower() or ".jpg"
+                        cache_path = f"{cache_base}{ext}"
+                        temp_path = f"{cache_path}.{os.getpid()}.{guid}.tmp"
+                        try:
+                            ok = self._pull_via_cli(item_id, temp_path)
+                            if ok and _is_usable_preview(temp_path):
+                                _promote_preview(temp_path, cache_path)
+                                result[guid] = cache_path
+                                any_cli_success = True
+                            else:
+                                result[guid] = None
+                        finally:
+                            if os.path.exists(temp_path):
+                                try:
+                                    os.remove(temp_path)
+                                except OSError:
+                                    pass
+                finally:
+                    try:
+                        self._ensure_connected()
+                    except Exception:
+                        pass
+
+                if any_cli_success:
+                    self._prefer_cli_pull = True
+        except Exception:
+            # Preserve existing behavior: preview failures are non-fatal.
+            return result
+
+        return result
+
     # ==================================================================
     # Session management
     # ==================================================================
@@ -566,10 +740,24 @@ class MacMTPBackend(RCBackend):
         def _has_file(path: str) -> bool:
             return os.path.isfile(path) and os.path.getsize(path) > 0
 
+        mtp_getfile = shutil.which("mtp-getfile")
+
+        # If this session already proved pymtp pull is unreliable, skip the
+        # expensive pymtp retry/disconnect cycle for every preview file.
+        if self._prefer_cli_pull and mtp_getfile:
+            self._disconnect()
+            if self._pull_via_cli(item_id, local_dest):
+                return True
+            try:
+                self._ensure_connected()
+            except Exception:
+                pass
+
         # First attempt: use the current session directly.
         try:
             self._quiet(self._mtp.get_file_to_file, int(item_id), local_dest)
             if _has_file(local_dest):
+                self._prefer_cli_pull = False
                 return True
         except Exception:
             pass
@@ -580,13 +768,14 @@ class MacMTPBackend(RCBackend):
             self._ensure_connected()
             self._quiet(self._mtp.get_file_to_file, int(item_id), local_dest)
             if _has_file(local_dest):
+                self._prefer_cli_pull = False
                 return True
         except Exception:
             pass
 
         # If mtp-getfile is not available, do not tear down the current
         # session just for a failed read attempt.
-        if not shutil.which("mtp-getfile"):
+        if not mtp_getfile:
             return False
 
         # Some RC-2 / libmtp combinations fail reads via pymtp with CommandFailed
@@ -594,6 +783,7 @@ class MacMTPBackend(RCBackend):
         # invoking the CLI path to avoid competing device sessions.
         self._disconnect()
         if self._pull_via_cli(item_id, local_dest):
+            self._prefer_cli_pull = True
             return True
 
         # Best-effort reconnection for subsequent operations in this process.

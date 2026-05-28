@@ -2,7 +2,6 @@ import hashlib
 import io
 import json
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -20,9 +19,10 @@ except ImportError:
     Image = None
 
 from backends.backend_factory import BackendFactory
-from config.config_manager import ConfigManager, get_runtime_base_dir
+from config.config_manager import ConfigManager
 from model.kmz_file import KMZFile
 from model.rc2_mission import RC2Mission
+from services.copy_map_service import CopyMapService
 
 
 class SyncViewModel:
@@ -51,10 +51,6 @@ class SyncViewModel:
     DEEP_INSPECT_FOLDER_SKIP_TOKENS = (
         "mediacache", "media_cache", "cachevideo", "video", "thumb", "thumbnail", "image",
     )
-    COPY_MAP_FILE = "kmz_copy_map.json"
-    COPY_MAP_FILE_MAC = "kmz_copy_map_m.json"
-    COPY_MAP_FILE_ENV = "DJI_RC2_COPY_MAP_FILE"
-
     def __init__(self, config: ConfigManager, copy_map_path: str | None = None):
         self._config = config
         self._last_error: str | None = None
@@ -63,21 +59,19 @@ class SyncViewModel:
         self._mtp_operation_lock = threading.Lock()
         self._rc_backend = BackendFactory.create_rc(config.rc2_folder, self._config)
         self._pc_backend = BackendFactory.create_pc(config)
-        if copy_map_path:
-            self._copy_map_path = copy_map_path
-        else:
-            base_dir = get_runtime_base_dir()
-            self._copy_map_path = os.path.join(base_dir, self._default_copy_map_filename())
-        self._ensure_copy_map_exists()
+        self._copy_map_service = CopyMapService(copy_map_path=copy_map_path)
+
+    @property
+    def _copy_map_path(self) -> str:
+        return self._copy_map_service.copy_map_path
+
+    @_copy_map_path.setter
+    def _copy_map_path(self, value: str) -> None:
+        self._copy_map_service.copy_map_path = value
 
     @classmethod
     def _default_copy_map_filename(cls) -> str:
-        override = os.environ.get(cls.COPY_MAP_FILE_ENV, "").strip()
-        if override:
-            return override
-        if platform.system().lower() == "darwin":
-            return cls.COPY_MAP_FILE_MAC
-        return cls.COPY_MAP_FILE
+        return CopyMapService.default_copy_map_filename()
 
     @staticmethod
     def _now_iso() -> str:
@@ -85,111 +79,33 @@ class SyncViewModel:
 
     @staticmethod
     def _default_copy_map_payload() -> dict[str, Any]:
-        return {
-            "updated_at": "",
-            "note": (
-                "This map tracks file-level copy operations only. If RC-2 is opened with "
-                "'adjust/open as new', DJI app metadata may create a new mission record that "
-                "diverges from this mapping."
-            ),
-            "by_source": {},
-        }
+        return CopyMapService.default_payload()
 
     def _ensure_copy_map_exists(self) -> None:
-        if os.path.isfile(self._copy_map_path):
-            return
-        self._save_copy_map(self._default_copy_map_payload())
+        self._copy_map_service.ensure_copy_map_exists()
 
     def _load_copy_map(self) -> dict[str, Any]:
-        if not os.path.isfile(self._copy_map_path):
-            return self._default_copy_map_payload()
-
-        try:
-            with open(self._copy_map_path, "r", encoding="utf-8") as fh:
-                loaded = json.load(fh)
-            if isinstance(loaded, dict):
-                loaded.setdefault("updated_at", "")
-                loaded.setdefault("note", "")
-                loaded.setdefault("by_source", {})
-                if not isinstance(loaded.get("by_source"), dict):
-                    loaded["by_source"] = {}
-                return loaded
-        except (OSError, json.JSONDecodeError):
-            pass
-
-        return self._default_copy_map_payload()
+        return self._copy_map_service.load_copy_map()
 
     def _save_copy_map(self, payload: dict[str, Any]) -> None:
-        try:
-            with open(self._copy_map_path, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, indent=4)
-        except OSError:
-            # Copy must still be considered successful even if map persistence fails.
-            return
+        self._copy_map_service.save_copy_map(payload)
 
     def _record_copy_mapping(self, source: KMZFile, mission: RC2Mission, dest_filename: str) -> None:
-        payload = self._load_copy_map()
-        by_source = payload.get("by_source") if isinstance(payload.get("by_source"), dict) else {}
-        payload["by_source"] = by_source
-
-        source_key = source.filename
-        entry = by_source.get(source_key)
-        if not isinstance(entry, dict):
-            entry = {"history": []}
-
-        history = entry.get("history") if isinstance(entry.get("history"), list) else []
-        row = {
-            "copied_at": self._now_iso(),
-            "source_filename": source.filename,
-            "source_full_path": source.full_path,
-            "target_mission_guid": mission.guid,
-            "target_kmz_filename": dest_filename,
-            "target_folder_path": mission.full_folder_path,
-            "connection_mode": self.get_rc2_connection_mode(),
-        }
-        history.append(row)
-        entry["history"] = history[-25:]
-        entry["last"] = row
-        by_source[source_key] = entry
-
-        payload["updated_at"] = self._now_iso()
-        self._save_copy_map(payload)
+        copied_at = self._now_iso()
+        updated_at = self._now_iso()
+        self._copy_map_service.record_mapping(
+            source_filename=source.filename,
+            source_full_path=source.full_path,
+            target_mission_guid=mission.guid,
+            target_kmz_filename=dest_filename,
+            target_folder_path=mission.full_folder_path,
+            connection_mode=self.get_rc2_connection_mode(),
+            copied_at=copied_at,
+            updated_at=updated_at,
+        )
 
     def get_copy_mapping_summary(self) -> tuple[list[dict[str, str]], str, str]:
-        payload = self._load_copy_map()
-        by_source = payload.get("by_source") if isinstance(payload.get("by_source"), dict) else {}
-
-        rows: list[dict[str, str]] = []
-        for source_name, value in by_source.items():
-            if not isinstance(value, dict):
-                continue
-
-            last = value.get("last") if isinstance(value.get("last"), dict) else None
-            if not last:
-                history = value.get("history") if isinstance(value.get("history"), list) else []
-                if history:
-                    candidate = history[-1]
-                    if isinstance(candidate, dict):
-                        last = candidate
-            if not last:
-                continue
-
-            rows.append(
-                {
-                    "source_filename": str(last.get("source_filename") or source_name or ""),
-                    "source_full_path": str(last.get("source_full_path") or ""),
-                    "target_mission_guid": str(last.get("target_mission_guid") or ""),
-                    "target_kmz_filename": str(last.get("target_kmz_filename") or ""),
-                    "target_folder_path": str(last.get("target_folder_path") or ""),
-                    "connection_mode": str(last.get("connection_mode") or ""),
-                    "copied_at": str(last.get("copied_at") or ""),
-                }
-            )
-
-        rows.sort(key=lambda row: row.get("copied_at") or "", reverse=True)
-        updated_at = str(payload.get("updated_at") or "")
-        note = str(payload.get("note") or "")
-        return rows, updated_at, note
+        return self._copy_map_service.get_summary()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -781,6 +697,7 @@ if ($result.Count -gt 0) { @($result) | ConvertTo-Json -Compress }
         missions: "List[RC2Mission]",
         copy_timeout_seconds: int | None = None,
         list_timeout_seconds: int | None = None,
+        allow_live_fetch: bool = True,
     ) -> "dict[str, str | None]":
         """Return {guid: disk_cache_path | None} for every mission.
 
@@ -795,7 +712,7 @@ if ($result.Count -gt 0) { @($result) | ConvertTo-Json -Compress }
             return {m.guid: None for m in missions}
 
         bulk_fetch = getattr(self._rc_backend, "get_preview_paths_bulk", None)
-        if callable(bulk_fetch):
+        if allow_live_fetch and callable(bulk_fetch):
             return bulk_fetch(
                 root,
                 [m.guid for m in missions],
@@ -808,6 +725,7 @@ if ($result.Count -gt 0) { @($result) | ConvertTo-Json -Compress }
                 m.guid,
                 copy_timeout_seconds=copy_timeout_seconds,
                 list_timeout_seconds=list_timeout_seconds,
+                allow_live_fetch=allow_live_fetch,
             )
             for m in missions
         }

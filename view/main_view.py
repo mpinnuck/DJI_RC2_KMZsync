@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v3.4"
+_APP_VERSION = "v3.5"
 
 
 try:
@@ -103,12 +103,14 @@ class MainView:
         self._delete_in_progress = False
         self._force_mapping_rerender_on_next_refresh_done = False
         self._refresh_pending = False
+        self._preview_bg_in_progress = False
         self._last_error_log_key: str | None = None
         self._last_error_log_time = 0.0
         self._setup_root()
         self._apply_styles()
         self._rc2_filter_var = tk.StringVar(value="")
         self._build_ui()
+        self._install_button_click_logging()
         self._start_rc2_connection_monitor()
         # Ensure uncaught Tk callback exceptions are surfaced in the UI log.
         self._root.report_callback_exception = self._handle_callback_exception
@@ -482,6 +484,26 @@ class MainView:
                 level="WARN",
             )
         self._refresh_mapping()
+
+    def _install_button_click_logging(self) -> None:
+        # Log left-click interactions on all UI buttons in one place.
+        self._root.bind_all("<ButtonRelease-1>", self._on_any_button_click, add="+")
+
+    def _on_any_button_click(self, event) -> None:
+        widget = event.widget
+        if not isinstance(widget, (tk.Button, ttk.Button)):
+            return
+
+        if str(widget.cget("state")) == str(tk.DISABLED):
+            return
+
+        try:
+            text = str(widget.cget("text") or "").strip()
+        except Exception:
+            text = ""
+
+        label = text if text else widget.winfo_class()
+        self._log(f"Button clicked: {label}", level="INFO")
 
     def _bind_tree_clear_on_blank(self, tree: ttk.Treeview) -> None:
         tree.bind("<Button-1>", lambda event, tv=tree: self._clear_tree_selection_if_blank(tv, event), add="+")
@@ -1293,6 +1315,7 @@ class MainView:
         self,
         preview_copy_timeout_seconds: int | None = None,
     ) -> tuple[list[RC2Mission], str | None, dict[str, bytes | None]]:
+        preview_started = time.monotonic()
         with self._rc2_scan_lock:
             missions = self._vm.load_rc2_missions()
             rc2_error = self._vm.consume_last_error()
@@ -1300,12 +1323,15 @@ class MainView:
         preview_data: dict[str, bytes | None] = {}
 
         if missions:
-            self._log("Loading RC-2 mission preview thumbnails...", level="DEBUG")
+            self._log("Loading RC-2 mission preview thumbnails (cache-first)...", level="DEBUG")
+            resolve_started = time.monotonic()
             preview_paths = self._vm.get_all_mission_preview_paths(
                 missions,
                 copy_timeout_seconds=preview_copy_timeout_seconds,
                 list_timeout_seconds=preview_copy_timeout_seconds,
+                allow_live_fetch=False,
             )
+            resolve_elapsed = int((time.monotonic() - resolve_started) * 1000)
             for mission in missions:
                 path = preview_paths.get(mission.guid)
                 data: bytes | None = None
@@ -1319,8 +1345,70 @@ class MainView:
 
             loaded_previews = sum(1 for data in preview_data.values() if data)
             self._log(f"{loaded_previews} previews loaded", level="DEBUG")
+            missing = len(missions) - loaded_previews
+            if missing > 0:
+                self._log(
+                    f"Queued background preview fetch for {missing} mission(s).",
+                    level="DEBUG",
+                )
+            read_elapsed = int((time.monotonic() - resolve_started) * 1000) - resolve_elapsed
+            total_elapsed = int((time.monotonic() - preview_started) * 1000)
+            self._log(
+                f"Preview timing: resolve_paths={resolve_elapsed} ms | read_files={max(read_elapsed, 0)} ms | total={total_elapsed} ms",
+                level="DEBUG",
+            )
 
         return missions, rc2_error, preview_data
+
+    def _start_background_preview_fetch(
+        self,
+        *,
+        serial: int,
+        missions: list[RC2Mission],
+        preview_data: dict[str, bytes | None],
+        attempt: int = 1,
+    ) -> None:
+        if self._preview_bg_in_progress:
+            return
+
+        missing = [mission for mission in missions if not preview_data.get(mission.guid)]
+        if not missing:
+            return
+
+        self._preview_bg_in_progress = True
+        self._log("Preview image background loader is in progress...", level="INFO")
+        self._log(
+            f"Background preview fetch started for {len(missing)} mission(s) (attempt {attempt}).",
+            level="DEBUG",
+        )
+
+        def _worker() -> None:
+            started = time.monotonic()
+            refreshed: dict[str, bytes | None] = {}
+            worker_error: str | None = None
+            try:
+                preview_paths = self._vm.get_all_mission_preview_paths(
+                    missing,
+                    allow_live_fetch=True,
+                )
+                for mission in missing:
+                    path = preview_paths.get(mission.guid)
+                    data: bytes | None = None
+                    if path and os.path.isfile(path):
+                        try:
+                            with open(path, "rb") as fh:
+                                data = fh.read()
+                        except OSError:
+                            data = None
+                    refreshed[mission.guid] = data
+            except Exception as exc:
+                worker_error = str(exc)
+            finally:
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                self._refresh_queue.put(("preview_bg", serial, refreshed, elapsed_ms, attempt, worker_error))
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self._root.after(50, self._drain_refresh_queue)
 
     def _schedule_rc2_background_retry(self, reason: str) -> None:
         if self._rc2_retry_after_id is not None:
@@ -1381,10 +1469,57 @@ class MainView:
             had_items = True
 
             kind = payload[0]
+            if kind == "preview_bg":
+                self._preview_bg_in_progress = False
+                serial = payload[1]
+                if serial != self._refresh_serial:
+                    continue
+
+                refreshed, elapsed_ms, attempt, worker_error = payload[2], payload[3], payload[4], payload[5]
+                updated = 0
+                for guid, data in refreshed.items():
+                    if data:
+                        self._last_preview_data[guid] = data
+                        updated += 1
+
+                if updated > 0:
+                    self._render_rc2_tree()
+                    selected = self._selected_mission()
+                    if selected is not None:
+                        self._set_large_preview(selected)
+                if worker_error:
+                    self._log(f"Background preview fetch failed: {worker_error}", level="ERROR")
+
+                self._log(
+                    f"Background previews loaded: {updated}/{len(refreshed)} in {elapsed_ms} ms (attempt {attempt})",
+                    level="DEBUG",
+                )
+
+                if (not worker_error) and refreshed and updated == 0 and attempt < 3:
+                    self._log(
+                        f"Background preview fetch returned no images; retrying ({attempt + 1}/3).",
+                        level="WARN",
+                    )
+                    retry_missions = [m for m in self._last_rc2_missions if m.guid in refreshed]
+                    if retry_missions:
+                        self._start_background_preview_fetch(
+                            serial=serial,
+                            missions=retry_missions,
+                            preview_data=self._last_preview_data,
+                            attempt=attempt + 1,
+                        )
+                continue
+
             if kind == "rc_retry":
                 _attempt, missions, rc2_error, preview_data, elapsed_ms = payload[1], payload[2], payload[3], payload[4], payload[5]
                 self._rc2_retry_in_progress = False
                 self._populate_rc2_tree(missions, rc2_error, preview_data)
+                if not rc2_error:
+                    self._start_background_preview_fetch(
+                        serial=self._refresh_serial,
+                        missions=missions,
+                        preview_data=preview_data,
+                    )
                 self._log(f"RC-2 background refresh time: {elapsed_ms} ms", level="DEBUG")
 
                 if rc2_error:
@@ -1416,6 +1551,12 @@ class MainView:
             if kind == "rc":
                 missions, rc2_error, preview_data = payload[2], payload[3], payload[4]
                 self._populate_rc2_tree(missions, rc2_error, preview_data)
+                if not rc2_error:
+                    self._start_background_preview_fetch(
+                        serial=serial,
+                        missions=missions,
+                        preview_data=preview_data,
+                    )
                 self._refresh_rc_loaded = True
                 if rc2_error:
                     self._schedule_rc2_background_retry("initial/manual refresh failed")
@@ -1453,11 +1594,11 @@ class MainView:
                     self._refresh_pending = False
                     self._root.after(10, self._refresh)
 
-        if (self._refresh_active or self._rc2_retry_in_progress) and not had_items:
+        if (self._refresh_active or self._rc2_retry_in_progress or self._preview_bg_in_progress) and not had_items:
             self._root.after(50, self._drain_refresh_queue)
             return
 
-        if self._refresh_active or self._rc2_retry_in_progress:
+        if self._refresh_active or self._rc2_retry_in_progress or self._preview_bg_in_progress:
             self._root.after(50, self._drain_refresh_queue)
 
     def _populate_rc2_tree(
@@ -1864,7 +2005,6 @@ class MainView:
 
     def _preview_image_for_mission(self, guid: str, image_data: bytes | None) -> tk.PhotoImage:
         if not image_data:
-            self._log(f"No preview bytes for mission {guid}, using placeholder.", level="DEBUG")
             return self._preview_placeholder_image()
 
         # Tk PhotoImage can fail for JPEG depending on Tcl/Tk build; Pillow
@@ -2061,6 +2201,7 @@ class MainView:
         self._log_text.configure(state=tk.NORMAL)
         self._log_text.delete("1.0", tk.END)
         self._log_text.configure(state=tk.DISABLED)
+        self._log("Button clicked: Clear Log", level="INFO")
         self._log("Log cleared.")
 
     def _focus_log(self, _event) -> None:
