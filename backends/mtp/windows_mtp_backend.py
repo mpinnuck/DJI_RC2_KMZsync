@@ -41,10 +41,10 @@ from backends.rc_backend import (
     RCBackend,
     _mtp_join,
     _mtp_segments,
-    _normalize_mtp_date,
 )
 from config.config_manager import ConfigManager
 from model.rc2_mission import RC2Mission
+from services.mtp_date_normalizer import normalize_mtp_modify_date
 
 
 _POWERSHELL_TIMEOUT = 30

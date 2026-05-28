@@ -1,37 +1,10 @@
 from datetime import datetime
 
+from services.mtp_date_normalizer import normalize_mtp_modify_date
+
 
 def format_display_datetime(dt: datetime) -> str:
     return dt.strftime("%d/%m/%Y %H:%M:%S")
-
-
-def normalize_mtp_modify_date(raw_value: str) -> str:
-    raw = (raw_value or "").strip()
-    if not raw:
-        return ""
-
-    if raw.startswith("12/30/1899") or raw.startswith("30/12/1899") or raw.startswith("1899-12-30"):
-        return ""
-
-    parse_formats = [
-        "%m/%d/%Y %I:%M %p",
-        "%m/%d/%Y %H:%M:%S",
-        "%d/%m/%Y %I:%M %p",
-        "%d/%m/%Y %H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-    ]
-
-    for fmt in parse_formats:
-        try:
-            parsed = datetime.strptime(raw, fmt)
-        except ValueError:
-            continue
-
-        if parsed.year <= 1900:
-            return ""
-        return format_display_datetime(parsed)
-
-    return raw
 
 
 def mtp_join(path: str, name: str) -> str:

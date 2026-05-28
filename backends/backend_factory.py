@@ -63,11 +63,9 @@ class BackendFactory:
             return MacADBBackend(config)
 
         if not cleaned:
-            # No path configured yet — return a disconnected ADB backend so
-            # connection checks (get_status, auto_detect) work without raising.
-            if is_windows:
-                return WindowsADBBackend(config)
-            return MacADBBackend(config)
+            return UnavailableRCBackend(
+                "No RC-2 path configured yet. Set an 'mtp:' (Windows) or 'adb:' path to continue."
+            )
 
         # Non-empty path with no recognised protocol prefix.
         # RC-2 is an Android device; bare filesystem paths are not valid roots.

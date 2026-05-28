@@ -1,13 +1,7 @@
 import os
-import time
 import uuid
 from datetime import datetime
 from typing import Any, List, Tuple
-
-try:
-    from PIL import Image
-except ImportError:
-    Image = None
 
 from backends.backend_factory import BackendFactory
 from config.config_manager import ConfigManager
@@ -49,6 +43,7 @@ class SyncViewModel:
     DEEP_INSPECT_FOLDER_SKIP_TOKENS = (
         "mediacache", "media_cache", "cachevideo", "video", "thumb", "thumbnail", "image",
     )
+
     def __init__(self, config: ConfigManager, copy_map_path: str | None = None):
         self._config = config
         self._last_error: str | None = None
@@ -66,14 +61,6 @@ class SyncViewModel:
         self._pc_backend = BackendFactory.create_pc(config)
         self._copy_map_service = CopyMapService(copy_map_path=copy_map_path)
 
-    @property
-    def _copy_map_path(self) -> str:
-        return self._copy_map_service.copy_map_path
-
-    @_copy_map_path.setter
-    def _copy_map_path(self, value: str) -> None:
-        self._copy_map_service.copy_map_path = value
-
     @staticmethod
     def _now_iso() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -88,8 +75,7 @@ class SyncViewModel:
         self._copy_map_service.save_copy_map(payload)
 
     def _record_copy_mapping(self, source: KMZFile, mission: RC2Mission, dest_filename: str) -> None:
-        copied_at = self._now_iso()
-        updated_at = self._now_iso()
+        now = self._now_iso()
         self._copy_map_service.record_mapping(
             source_filename=source.filename,
             source_full_path=source.full_path,
@@ -97,8 +83,8 @@ class SyncViewModel:
             target_kmz_filename=dest_filename,
             target_folder_path=mission.full_folder_path,
             connection_mode=self.get_rc2_connection_mode(),
-            copied_at=copied_at,
-            updated_at=updated_at,
+            copied_at=now,
+            updated_at=now,
         )
 
     def get_copy_mapping_summary(self) -> tuple[list[dict[str, str]], str, str]:

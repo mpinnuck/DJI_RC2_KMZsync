@@ -28,8 +28,7 @@ import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 try:
     from PIL import Image
@@ -38,6 +37,7 @@ except ImportError:
 
 from config.config_manager import ConfigManager
 from model.rc2_mission import RC2Mission
+from services.mtp_date_normalizer import normalize_mtp_modify_date
 
 # Folders present in the waypoint root that are not mission slots.
 _NON_MISSION_FOLDERS = frozenset({"capability", "map_preview"})
@@ -235,7 +235,7 @@ class RCBackend(ABC):
                 if not slot_name:
                     continue
                 kmz_name = str(row.get("KMZName") or "").strip()
-                last_modified = _normalize_mtp_date(
+                last_modified = normalize_mtp_modify_date(
                     str(row.get("ModifyDateDetail") or "")
                     or str(row.get("ModifyDate") or "")
                 )
@@ -282,7 +282,7 @@ class RCBackend(ABC):
                 key=lambda t: t[0],
             )
             kmz_name = kmz_files[0][0] if kmz_files else ""
-            last_modified = _normalize_mtp_date(kmz_files[0][1]) if kmz_files else ""
+            last_modified = normalize_mtp_modify_date(kmz_files[0][1]) if kmz_files else ""
             missions.append(RC2Mission(
                 guid=slot_name,
                 kmz_name=kmz_name,
@@ -329,7 +329,7 @@ class RCBackend(ABC):
             return False, str(result)
         items = result if isinstance(result, list) else []
         output = [
-            (name, is_folder, _normalize_mtp_date(modified))
+            (name, is_folder, normalize_mtp_modify_date(modified))
             for name, is_folder, modified in items
             if name.strip()
         ]
@@ -430,11 +430,13 @@ class RCBackend(ABC):
             if os.path.exists(local_dest_path):
                 os.remove(local_dest_path)
             os.replace(temp_path, local_dest_path)
+            # Temp file has been atomically promoted to destination.
+            temp_path = ""
             return True, local_dest_path
         except OSError as exc:
             return False, str(exc)
         finally:
-            if os.path.exists(temp_path):
+            if temp_path and os.path.exists(temp_path):
                 try:
                     os.remove(temp_path)
                 except OSError:
@@ -596,63 +598,6 @@ class RCBackend(ABC):
             if cleaned:
                 candidates.append(cleaned)
 
-        def _expand_folders(
-            seeds: List[str],
-            max_depth: int,
-            max_folders: int,
-            max_listings: int,
-            include_tokens: Tuple[str, ...] | None,
-            skip_tokens: Tuple[str, ...] | None,
-        ) -> List[str]:
-            seen: set[str] = set()
-            ordered: List[str] = []
-            queue_items: List[Tuple[str, int]] = []
-            listing_count = 0
-
-            for path in seeds:
-                cleaned = (path or "").strip()
-                if not cleaned or cleaned in seen:
-                    continue
-                seen.add(cleaned)
-                ordered.append(cleaned)
-                queue_items.append((cleaned, 0))
-
-            index = 0
-            while index < len(queue_items) and len(ordered) < max_folders:
-                if deadline is not None and time.monotonic() > deadline:
-                    break
-                if listing_count >= max_listings:
-                    break
-                folder, depth = queue_items[index]
-                index += 1
-                if depth >= max_depth:
-                    continue
-
-                ok, listed = self.list_folder_items(folder)
-                listing_count += 1
-                if not ok:
-                    continue
-
-                items = listed if isinstance(listed, list) else []
-                for name, is_folder, _ in items:
-                    if not is_folder:
-                        continue
-                    lowered = name.lower()
-                    if skip_tokens and any(token in lowered for token in skip_tokens):
-                        continue
-                    if include_tokens and not any(token in lowered for token in include_tokens):
-                        continue
-                    child = self.join_folder_path(folder, name)
-                    if child in seen:
-                        continue
-                    seen.add(child)
-                    ordered.append(child)
-                    if len(ordered) >= max_folders:
-                        break
-                    queue_items.append((child, depth + 1))
-
-            return ordered
-
         if root_scheme == "mtp":
             _add_candidate(root)
             parent_files = _mtp_parent_path(root, levels=1)
@@ -682,8 +627,11 @@ class RCBackend(ABC):
         scan_folder_cap = max_scan_folders_mtp if use_mtp_limits else 20
         read_cap = max_file_reads_mtp if use_mtp_limits else 1000
 
-        unique_candidates = _expand_folders(
+        unique_candidates = _expand_folder_candidates(
             candidates,
+            list_folder_items=self.list_folder_items,
+            join_folder_path=self.join_folder_path,
+            deadline=deadline,
             max_depth=expand_depth,
             max_folders=expand_max_folders,
             max_listings=scan_folder_cap,
@@ -776,8 +724,8 @@ class RCBackend(ABC):
 
     def inspect_binary_metadata_candidates(
         self,
-        mission: RC2Mission,
-        kmz_name: str,
+        _mission: RC2Mission,
+        _kmz_name: str,
         *,
         time_budget_seconds_mtp: float = 8.0,
         max_depth_mtp: int = 1,
@@ -790,9 +738,6 @@ class RCBackend(ABC):
             "mediacache", "media_cache", "cachevideo", "video", "thumb", "thumbnail", "image",
         ),
     ) -> List[str]:
-        _ = mission
-        _ = kmz_name
-
         lines: List[str] = []
         root = self._root()
         candidates: List[str] = []
@@ -807,63 +752,6 @@ class RCBackend(ABC):
             cleaned = (path or "").strip()
             if cleaned:
                 candidates.append(cleaned)
-
-        def _expand_folders(
-            seeds: List[str],
-            max_depth: int,
-            max_folders: int,
-            max_listings: int,
-            include_tokens: Tuple[str, ...] | None,
-            skip_tokens: Tuple[str, ...] | None,
-        ) -> List[str]:
-            seen: set[str] = set()
-            ordered: List[str] = []
-            queue_items: List[Tuple[str, int]] = []
-            listing_count = 0
-
-            for path in seeds:
-                cleaned = (path or "").strip()
-                if not cleaned or cleaned in seen:
-                    continue
-                seen.add(cleaned)
-                ordered.append(cleaned)
-                queue_items.append((cleaned, 0))
-
-            index = 0
-            while index < len(queue_items) and len(ordered) < max_folders:
-                if deadline is not None and time.monotonic() > deadline:
-                    break
-                if listing_count >= max_listings:
-                    break
-                folder, depth = queue_items[index]
-                index += 1
-                if depth >= max_depth:
-                    continue
-
-                ok, listed = self.list_folder_items(folder)
-                listing_count += 1
-                if not ok:
-                    continue
-
-                items = listed if isinstance(listed, list) else []
-                for name, is_folder, _ in items:
-                    if not is_folder:
-                        continue
-                    lowered = name.lower()
-                    if skip_tokens and any(token in lowered for token in skip_tokens):
-                        continue
-                    if include_tokens and not any(token in lowered for token in include_tokens):
-                        continue
-                    child = self.join_folder_path(folder, name)
-                    if child in seen:
-                        continue
-                    seen.add(child)
-                    ordered.append(child)
-                    if len(ordered) >= max_folders:
-                        break
-                    queue_items.append((child, depth + 1))
-
-            return ordered
 
         if root_scheme == "mtp":
             _add_candidate(root)
@@ -884,8 +772,11 @@ class RCBackend(ABC):
         expand_max_folders = max_folders_mtp if use_mtp_limits else 80
         scan_folder_cap = max_scan_folders_mtp if use_mtp_limits else 20
 
-        unique_candidates = _expand_folders(
+        unique_candidates = _expand_folder_candidates(
             candidates,
+            list_folder_items=self.list_folder_items,
+            join_folder_path=self.join_folder_path,
+            deadline=deadline,
             max_depth=expand_depth,
             max_folders=expand_max_folders,
             max_listings=scan_folder_cap,
@@ -1034,6 +925,68 @@ def _path_scheme(path: str) -> str:
     return cleaned[:sep].strip().lower()
 
 
+def _expand_folder_candidates(
+    seeds: List[str],
+    *,
+    list_folder_items: Callable[[str], Tuple[bool, List[Tuple[str, bool, str]] | str]],
+    join_folder_path: Callable[[str, str], str],
+    deadline: float | None,
+    max_depth: int,
+    max_folders: int,
+    max_listings: int,
+    include_tokens: Tuple[str, ...] | None,
+    skip_tokens: Tuple[str, ...] | None,
+) -> List[str]:
+    seen: set[str] = set()
+    ordered: List[str] = []
+    queue_items: List[Tuple[str, int]] = []
+    listing_count = 0
+
+    for path in seeds:
+        cleaned = (path or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        ordered.append(cleaned)
+        queue_items.append((cleaned, 0))
+
+    index = 0
+    while index < len(queue_items) and len(ordered) < max_folders:
+        if deadline is not None and time.monotonic() > deadline:
+            break
+        if listing_count >= max_listings:
+            break
+        folder, depth = queue_items[index]
+        index += 1
+        if depth >= max_depth:
+            continue
+
+        ok, listed = list_folder_items(folder)
+        listing_count += 1
+        if not ok:
+            continue
+
+        items = listed if isinstance(listed, list) else []
+        for name, is_folder, _ in items:
+            if not is_folder:
+                continue
+            lowered = name.lower()
+            if skip_tokens and any(token in lowered for token in skip_tokens):
+                continue
+            if include_tokens and not any(token in lowered for token in include_tokens):
+                continue
+            child = join_folder_path(folder, name)
+            if child in seen:
+                continue
+            seen.add(child)
+            ordered.append(child)
+            if len(ordered) >= max_folders:
+                break
+            queue_items.append((child, depth + 1))
+
+    return ordered
+
+
 def _adb_remote_root(path: str) -> str:
     raw = (path or "").strip()
     if raw.lower().startswith("adb:"):
@@ -1043,34 +996,6 @@ def _adb_remote_root(path: str) -> str:
     if not raw.startswith("/"):
         raw = f"/{raw}"
     return raw.replace("\\", "/")
-
-
-def _normalize_mtp_date(raw_value: str) -> str:
-    raw = (raw_value or "").strip()
-    if not raw:
-        return ""
-    # DJI firmware emits 12/30/1899 as a sentinel for unknown dates.
-    if any(
-        raw.startswith(prefix)
-        for prefix in ("12/30/1899", "30/12/1899", "1899-12-30")
-    ):
-        return ""
-    formats = [
-        "%m/%d/%Y %I:%M %p",
-        "%m/%d/%Y %H:%M:%S",
-        "%d/%m/%Y %I:%M %p",
-        "%d/%m/%Y %H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-    ]
-    for fmt in formats:
-        try:
-            parsed = datetime.strptime(raw, fmt)
-        except ValueError:
-            continue
-        if parsed.year <= 1900:
-            return ""
-        return parsed.strftime("%d/%m/%Y %H:%M:%S")
-    return raw
 
 
 def _preview_cache_dir() -> str:

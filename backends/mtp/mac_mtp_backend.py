@@ -20,6 +20,7 @@ Thread safety:
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import shutil
 import subprocess
@@ -54,6 +55,9 @@ except Exception:
 if _pymtp is not None:
     # Silence pymtp debug output.
     _pymtp.__DEBUG__ = 0
+
+
+_LOG = logging.getLogger(__name__)
 
 
 def _decode(value) -> str:
@@ -126,7 +130,16 @@ class MacMTPBackend(RCBackend):
         self._connection_lock = threading.RLock()
         # Folder and file listing caches valid for the life of one connection.
         self._folder_cache: list | None = None
+        self._folders_by_parent_cache: dict[int, list] | None = None
         self._file_cache: list | None = None
+        self._files_by_parent_cache: dict[int, list] | None = None
+        # Strict safe mode avoids cold-cache global file indexing for non-ID
+        # lookups (for example folder browsing); operations requiring item IDs
+        # can still populate the global file index.
+        self._strict_safe_mode = os.environ.get(
+            "DJIRC2KMZSYNC_MTP_STRICT_SAFE_MODE", "0"
+        ).strip() in {"1", "true", "yes", "on"}
+        self._logged_global_file_index = False
 
     # ==================================================================
     # _raw_* primitives
@@ -239,6 +252,7 @@ class MacMTPBackend(RCBackend):
                     raise _pymtp.CommandFailed()
                 # Invalidate caches -- file listing has changed.
                 self._file_cache = None
+                self._files_by_parent_cache = None
             return True, f"Copied to {_mtp_join(dest_folder, dest_filename)}"
         except Exception as exc:
             return False, f"MTP write failed:\n{self._fmt_exc(exc)}"
@@ -272,6 +286,7 @@ class MacMTPBackend(RCBackend):
                     return True, "NOT_FOUND"
                 self._quiet(self._mtp.delete_object, int(entry.item_id))
                 self._file_cache = None
+                self._files_by_parent_cache = None
             return True, f"Deleted {filename}"
         except Exception as exc:
             return False, f"MTP delete failed:\n{self._fmt_exc(exc)}"
@@ -286,7 +301,9 @@ class MacMTPBackend(RCBackend):
                     return False, f"Folder not found: {folder_path}"
                 self._delete_folder_recursive(int(folder.folder_id))
                 self._folder_cache = None
+                self._folders_by_parent_cache = None
                 self._file_cache   = None
+                self._files_by_parent_cache = None
             segments = _mtp_segments(folder_path)
             name = segments[-1] if segments else folder_path
             return True, f"Deleted {name}"
@@ -310,6 +327,7 @@ class MacMTPBackend(RCBackend):
                     storage=int(parent.storage_id),
                 )
                 self._folder_cache = None
+                self._folders_by_parent_cache = None
             return True, _mtp_join(parent_path, name)
         except Exception as exc:
             return False, f"MTP create folder failed:\n{self._fmt_exc(exc)}"
@@ -327,6 +345,7 @@ class MacMTPBackend(RCBackend):
 
                 # Force a live folder read so disconnects are detected promptly.
                 self._folder_cache = None
+                self._folders_by_parent_cache = None
                 # Keep probe lightweight: just confirm waypoint folder exists.
                 return self._waypoint_folder_exists()
         except Exception:
@@ -538,7 +557,11 @@ class MacMTPBackend(RCBackend):
             pass
         self._connected   = False
         self._folder_cache = None
+        self._folders_by_parent_cache = None
         self._file_cache   = None
+        self._files_by_parent_cache = None
+        self._logged_global_file_index = False
+        self._prefer_cli_pull = False
 
     def _ensure_connected(self) -> None:
         if self._mtp is None:
@@ -555,7 +578,10 @@ class MacMTPBackend(RCBackend):
                 self._quiet(self._mtp.connect)
                 self._connected   = True
                 self._folder_cache = None
+                self._folders_by_parent_cache = None
                 self._file_cache   = None
+                self._files_by_parent_cache = None
+                self._logged_global_file_index = False
                 return
             except Exception as exc:
                 last_exc = exc
@@ -641,11 +667,22 @@ class MacMTPBackend(RCBackend):
                     )
                 values = list(_walk_folder_tree(root_ptr))
         self._folder_cache = values
+        by_parent: dict[int, list] = {}
+        for folder in values:
+            parent_id = int(getattr(folder, "parent_id", -1))
+            by_parent.setdefault(parent_id, []).append(folder)
+        self._folders_by_parent_cache = by_parent
         return values
 
-    def _all_files(self) -> list:
+    def _all_files(self, reason: str = "general") -> list:
         if self._file_cache is not None:
             return self._file_cache
+        if not self._logged_global_file_index:
+            _LOG.info(
+                "Building global MTP file index (reason=%s). This can be expensive on data-heavy devices.",
+                reason,
+            )
+            self._logged_global_file_index = True
         try:
             files = list(self._quiet(self._mtp.get_filelisting))
         except Exception as exc:
@@ -656,19 +693,37 @@ class MacMTPBackend(RCBackend):
             else:
                 raise
         self._file_cache = files
+        by_parent: dict[int, list] = {}
+        for entry in files:
+            parent_id = int(getattr(entry, "parent_id", -1))
+            by_parent.setdefault(parent_id, []).append(entry)
+        self._files_by_parent_cache = by_parent
         return files
 
-    def _root_folders(self) -> list:
-        return [
-            f for f in self._all_folders()
-            if int(getattr(f, "parent_id", -1)) == 0
-        ]
+    def _files_by_parent(self) -> dict[int, list]:
+        if self._files_by_parent_cache is not None:
+            return self._files_by_parent_cache
+        self._all_files(reason="parent_lookup")
+        return self._files_by_parent_cache or {}
 
-    def _child_entries(self, parent_id: int) -> tuple[list, list]:
-        all_f = self._all_folders()
-        all_fi = self._all_files()
-        folders = [f for f in all_f  if int(getattr(f, "parent_id",  -1)) == parent_id]
-        files   = [f for f in all_fi if int(getattr(f, "parent_id",  -1)) == parent_id]
+    def _folders_by_parent(self) -> dict[int, list]:
+        if self._folders_by_parent_cache is not None:
+            return self._folders_by_parent_cache
+        self._all_folders()
+        return self._folders_by_parent_cache or {}
+
+    def _files_for_parent(self, parent_id: int, *, require_ids: bool = False) -> list:
+        if self._strict_safe_mode and not require_ids:
+            cached = self._files_by_parent_cache or {}
+            return list(cached.get(parent_id, []))
+        return list(self._files_by_parent().get(parent_id, []))
+
+    def _root_folders(self) -> list:
+        return list(self._folders_by_parent().get(0, []))
+
+    def _child_entries(self, parent_id: int, *, require_file_ids: bool = False) -> tuple[list, list]:
+        folders = list(self._folders_by_parent().get(parent_id, []))
+        files = self._files_for_parent(parent_id, require_ids=require_file_ids)
         return folders, files
 
     def _resolve_folder(self, path: str):
@@ -681,18 +736,16 @@ class MacMTPBackend(RCBackend):
         if not segments:
             return None
 
-        all_folders = self._all_folders()
+        by_parent = self._folders_by_parent()
         # Start from device root (parent_id == 0).
-        current = self._root_folders()
+        current = by_parent.get(0, [])
 
         for segment in segments:
             wanted = segment.strip().lower()
             next_level = []
             for folder in current:
                 folder_id = int(getattr(folder, "folder_id", -1))
-                for child in all_folders:
-                    if int(getattr(child, "parent_id", -1)) != folder_id:
-                        continue
+                for child in by_parent.get(folder_id, []):
                     if _decode(getattr(child, "name", "")).strip().lower() == wanted:
                         next_level.append(child)
             if not next_level:
@@ -717,14 +770,14 @@ class MacMTPBackend(RCBackend):
 
     def _find_file_in_folder(self, folder_id: int, filename: str):
         wanted = filename.strip().lower()
-        _, child_files = self._child_entries(folder_id)
+        child_files = self._files_for_parent(folder_id, require_ids=True)
         for entry in child_files:
             if _decode(getattr(entry, "filename", "")).strip().lower() == wanted:
                 return entry
         return None
 
     def _delete_folder_recursive(self, folder_id: int) -> None:
-        child_folders, child_files = self._child_entries(folder_id)
+        child_folders, child_files = self._child_entries(folder_id, require_file_ids=True)
         for entry in child_files:
             self._quiet(self._mtp.delete_object, int(entry.item_id))
         for folder in child_folders:
