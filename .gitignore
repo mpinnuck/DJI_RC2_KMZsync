@@ -18,6 +18,7 @@ kmz_sync_config.json
 
 # Distribution / packaging
 dist/
+distm/
 build/
 *.egg-info/
 

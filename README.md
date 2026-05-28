@@ -100,6 +100,28 @@ After setup, normal PC to RC copy only requires selecting a PC KMZ and clicking 
 
 Distribute the full dist\DJI_RC2_KMZsync folder (exe + _internal).
 
+## GitHub Release Builds
+
+This repository includes a GitHub Actions workflow that builds both platforms and publishes assets on tags.
+
+- Workflow file: .github/workflows/release-build.yml
+- Trigger release build: push a tag like v1.0.0
+- Also supports manual runs via workflow_dispatch
+
+Release assets:
+
+- DJI_RC2_KMZsync_windows.zip
+- DJI_RC2_KMZsync_macos.zip
+
+After downloading:
+
+1. Extract the zip.
+2. Launch the app.
+3. Set PC KMZ Folder.
+4. Set RC-2 Root (MTP or ADB as needed).
+
+After those two folders are set, normal sync/copy flows are ready to use.
+
 Supported RC-2 access modes:
 - MTP (recommended, Explorer-style)
 - ADB (optional)

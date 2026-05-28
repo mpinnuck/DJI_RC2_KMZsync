@@ -35,6 +35,9 @@ from backends.rc_backend import RCBackend, _mtp_join, _mtp_segments
 from config.config_manager import ConfigManager
 from model.rc2_mission import RC2Mission
 
+# Suppress native libmtp debug output globally for this process.
+os.environ.setdefault("LIBMTP_DEBUG", "0")
+
 try:
     import pymtp as _pymtp
 except Exception:
