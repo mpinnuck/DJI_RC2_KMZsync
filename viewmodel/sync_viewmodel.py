@@ -647,6 +647,23 @@ if ($result.Count -gt 0) { @($result) | ConvertTo-Json -Compress }
                 except OSError:
                     pass
 
+    def clear_all_preview_cache(self) -> Tuple[bool, str]:
+        """Clear all locally cached RC preview images for the configured root."""
+        root = (self._config.rc2_folder or "").strip()
+        if not root:
+            return False, "RC-2 root is not configured."
+
+        # Clear legacy timestamp/cache artifacts used by older preview paths.
+        self.clear_stale_preview_cache()
+
+        try:
+            self._rc_backend.clear_preview_cache(root)
+            self._rc_backend.invalidate_cache()
+        except Exception as exc:
+            return False, f"Failed to clear preview cache:\n{exc}"
+
+        return True, "Preview cache cleared. Next refresh will reload previews from RC-2."
+
     @staticmethod
     def _cache_temp_copy_path(cache_path: str) -> str:
         return f"{cache_path}.{uuid.uuid4().hex}.tmp"
@@ -856,6 +873,13 @@ if ($devices) {
 
     def diagnose_rc2_connection(self) -> Tuple[bool, str, str | None]:
         root = (self._config.rc2_folder or "").strip()
+        scheme = BackendFactory.path_scheme(root)
+
+        # If a configured transport is currently reachable, keep it.
+        if root and scheme in {"adb", "mtp"}:
+            ok, status = self._rc_backend.get_status()
+            if ok:
+                return True, f"Configured RC-2 root is reachable via {scheme.upper()}: {root}", root
 
         if root and BackendFactory.path_scheme(root) not in {"adb", "mtp"} and os.path.isdir(root):
             return True, f"RC-2 folder is reachable on disk: {root}", root
@@ -1006,7 +1030,16 @@ if ($devices) {
         """
         Return (ready, message) for current ADB device state.
         """
-        return self._rc_backend.get_status()
+        adb_backend = BackendFactory.create_rc(self.DEFAULT_ADB_RC2_ROOT, self._config)
+        try:
+            return adb_backend.get_status()
+        finally:
+            close_backend = getattr(adb_backend, "close", None)
+            if callable(close_backend):
+                try:
+                    close_backend()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Core sync operation
@@ -1127,20 +1160,15 @@ if ($devices) {
         dest_filename: str,
     ) -> Tuple[bool, str]:
         expected_size = os.path.getsize(source_path)
-
-        fd, temp_path = tempfile.mkstemp(prefix="djirc2kmzsync-verify-", suffix=".kmz")
-        os.close(fd)
         try:
-            ok_pull, out_pull = self._copy_file_from_mtp_folder(
+            ok_size, out_size = self._rc_backend.get_file_size_from_path(
                 mission.full_folder_path,
                 dest_filename,
-                temp_path,
-                timeout_seconds=self.MTP_VERIFY_TIMEOUT_SECONDS,
             )
-            if not ok_pull:
-                return False, f"Unable to pull destination for verification:\n{out_pull}"
+            if not ok_size:
+                return False, f"Unable to query destination size for verification:\n{out_size}"
 
-            actual_size = os.path.getsize(temp_path)
+            actual_size = int(out_size)
             size_diff = abs(actual_size - expected_size)
             percent_diff = (size_diff / float(expected_size) * 100.0) if expected_size > 0 else 100.0
             if actual_size <= 0 or (
@@ -1155,11 +1183,6 @@ if ($devices) {
                 )
         except OSError as e:
             return False, f"Verification failed:\n{e}"
-        finally:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
 
         return True, "ok"
 

@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v3.2"
+_APP_VERSION = "v3.3"
 
 
 try:
@@ -58,6 +58,7 @@ class MainView:
         self._last_preview_data: dict[str, bytes | None] = {}
         self._previous_refresh_guids: set[str] = set()
         self._new_guids_in_latest_refresh: set[str] = set()
+        self._new_guid_highlight_expires_at = 0.0
         self._rc2_guid_baseline_initialized = False
         self._mission_preview_images: dict[str, tk.PhotoImage] = {}
         self._selected_preview_image: tk.PhotoImage | None = None
@@ -93,6 +94,7 @@ class MainView:
         self._busy_popup: tk.Toplevel | None = None
         self._busy_popup_message_var: tk.StringVar | None = None
         self._busy_popup_progress: ttk.Progressbar | None = None
+        self._adb_status_button: ttk.Button | None = None
         self._copy_in_progress = False
         self._inspect_in_progress = False
         self._inspect_request_id = 0
@@ -363,15 +365,21 @@ class MainView:
             text="Detect RC-2",
             command=self._detect_rc2,
         ).pack(side=tk.RIGHT, padx=(0, 6))
-        ttk.Button(
+        self._adb_status_button = ttk.Button(
             log_header,
             text="ADB Status",
             command=self._check_adb_status,
-        ).pack(side=tk.RIGHT, padx=(0, 6))
+        )
+        self._adb_status_button.pack(side=tk.RIGHT, padx=(0, 6))
         ttk.Button(
             log_header,
             text="Inspect + Metadata",
             command=lambda: self._inspect_selected_mission(deep=True),
+        ).pack(side=tk.RIGHT, padx=(0, 6))
+        ttk.Button(
+            log_header,
+            text="Clear Preview Cache",
+            command=self._clear_preview_cache,
         ).pack(side=tk.RIGHT, padx=(0, 6))
         ttk.Button(
             log_header,
@@ -1000,6 +1008,18 @@ class MainView:
         self._log(f"Delete failed after {elapsed_ms} ms", level="DEBUG")
 
     def _check_adb_status(self) -> None:
+        if self._vm.get_rc2_connection_mode() == "ADB":
+            self._log("MTP mode switch requested.")
+            mtp_root = self._vm.DEFAULT_MTP_RC2_ROOT
+            self._vm.set_rc2_folder(mtp_root)
+            self._rc2_entry.delete(0, tk.END)
+            self._rc2_entry.insert(0, self._vm.rc2_folder)
+            self._update_connection_mode()
+            self._set_status("Switched to MTP mode.", colour=_SUCCESS)
+            self._log(f"RC-2 root switched to {mtp_root}.", level="OK")
+            self._refresh()
+            return
+
         self._log("ADB status check requested.")
         ok, message = self._vm.get_adb_status()
         if ok:
@@ -1200,6 +1220,23 @@ class MainView:
         self._set_status("✘  RC-2 not detected.", colour=_ERROR)
         self._log(message, level="ERROR")
 
+    def _clear_preview_cache(self) -> None:
+        if self._refresh_active or self._copy_in_progress or self._delete_in_progress:
+            self._set_status("Wait for current operation to finish before clearing preview cache.", colour=_TEXT_DIM)
+            self._log("Clear preview cache blocked: operation already in progress.", level="WARN")
+            return
+
+        self._log("Clear preview cache requested.", level="INFO")
+        ok, message = self._vm.clear_all_preview_cache()
+        if not ok:
+            self._set_status("✘  Clear preview cache failed.", colour=_ERROR)
+            self._log(message.replace("\n", " | "), level="ERROR")
+            return
+
+        self._set_status("Preview cache cleared. Refreshing...", colour=_SUCCESS)
+        self._log(message, level="OK")
+        self._refresh()
+
     # ------------------------------------------------------------------
     # Tree population
     # ------------------------------------------------------------------
@@ -1279,6 +1316,9 @@ class MainView:
                     except OSError:
                         data = None
                 preview_data[mission.guid] = data
+
+            loaded_previews = sum(1 for data in preview_data.values() if data)
+            self._log(f"{loaded_previews} previews loaded", level="DEBUG")
 
         return missions, rc2_error, preview_data
 
@@ -1428,6 +1468,7 @@ class MainView:
     ) -> None:
         current_guids = {m.guid for m in missions}
         is_success = not bool(last_error)
+        now = time.monotonic()
 
         if not self._rc2_guid_baseline_initialized:
             # Startup baseline should be established only from a successful RC
@@ -1438,7 +1479,22 @@ class MainView:
                 self._previous_refresh_guids = current_guids
                 self._rc2_guid_baseline_initialized = True
         elif is_success:
-            self._new_guids_in_latest_refresh = current_guids - self._previous_refresh_guids
+            detected_new_guids = current_guids - self._previous_refresh_guids
+            same_guid_set = current_guids == self._previous_refresh_guids
+            if detected_new_guids:
+                self._new_guids_in_latest_refresh = detected_new_guids
+                # Keep highlight briefly so immediate duplicate refresh cycles
+                # (same GUID set, same data) do not clear it before the user sees it.
+                self._new_guid_highlight_expires_at = now + 20.0
+            elif (
+                same_guid_set
+                and self._new_guids_in_latest_refresh
+                and now < self._new_guid_highlight_expires_at
+            ):
+                # Preserve current highlight set for a short hold window.
+                pass
+            else:
+                self._new_guids_in_latest_refresh = set()
             self._previous_refresh_guids = current_guids
         else:
             # Do not mutate baseline/new markers on failed loads.
@@ -1497,10 +1553,11 @@ class MainView:
             tags: list[str] = []
             if m.is_empty:
                 tags.append("empty")
-            if m.guid in self._new_guids_in_latest_refresh:
-                tags.append("new_mission")
             if dummy_slot_guid and m.guid == dummy_slot_guid:
                 tags.append("dummy_slot")
+            if m.guid in self._new_guids_in_latest_refresh:
+                # Keep this tag last so green highlight wins over other row tags.
+                tags.append("new_mission")
             preview_image = self._preview_image_for_mission(m.guid, self._last_preview_data.get(m.guid))
             timestamp_display = m.display_last_modified
             if source_kmz:
@@ -1721,6 +1778,12 @@ class MainView:
         self._mode_var.set(f"Mode: {mode_text}")
         self._mode_label.configure(bg=bg, fg=fg)
 
+        if self._adb_status_button is not None:
+            if mode == "ADB":
+                self._adb_status_button.configure(text="MTP")
+            else:
+                self._adb_status_button.configure(text="ADB Status")
+
     def _set_busy(self, busy: bool, message: str) -> None:
         self._busy = busy
         self._busy_var.set(message if busy else "")
@@ -1813,7 +1876,6 @@ class MainView:
                     rendered.thumbnail((80, 60))
                     image = ImageTk.PhotoImage(rendered)
                 self._mission_preview_images[guid] = image
-                self._log(f"Successfully loaded image for mission: {guid}", level="DEBUG")
                 return image
             except Exception as e:
                 self._log(f"Failed to decode preview bytes for {guid}: {e}", level="ERROR")

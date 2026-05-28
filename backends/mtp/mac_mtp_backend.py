@@ -19,6 +19,7 @@ Thread safety:
 
 from __future__ import annotations
 
+import ctypes
 import os
 import shutil
 import subprocess
@@ -178,14 +179,6 @@ class MacMTPBackend(RCBackend):
         if not self._available:
             return False, self._unavailable()
 
-        # Stage a renamed copy if source basename != dest_filename.
-        source_to_send = local_source
-        temp_dir: str | None = None
-        if os.path.basename(local_source) != dest_filename:
-            temp_dir = tempfile.mkdtemp(prefix="djirc2kmzsync-mac-stage-")
-            source_to_send = os.path.join(temp_dir, dest_filename)
-            shutil.copy2(local_source, source_to_send)
-
         try:
             with self._session():
                 folder = self._resolve_folder(dest_folder)
@@ -199,26 +192,61 @@ class MacMTPBackend(RCBackend):
                 if existing is not None:
                     self._quiet(self._mtp.delete_object, int(existing.item_id))
 
+                filename_bytes = dest_filename.encode("utf-8")
+                filetype = self._quiet(self._mtp.find_filetype, local_source)
+                filesize = os.stat(local_source).st_size
                 metadata = _pymtp.LIBMTP_File(
-                    filename=dest_filename,
-                    filetype=self._quiet(
-                        self._mtp.find_filetype, source_to_send
-                    ),
-                    filesize=os.stat(source_to_send).st_size,
+                    filename=filename_bytes,
+                    filetype=filetype,
+                    filesize=filesize,
                 )
-                metadata.parent_id  = int(folder.folder_id)
+
+                metadata.parent_id = int(folder.folder_id)
                 metadata.storage_id = int(folder.storage_id)
-                self._quiet(
-                    self._mtp.send_file_from_file, source_to_send, metadata
+                send_fn = self._mtp.mtp.LIBMTP_Send_File_From_File
+                if hasattr(send_fn, "argtypes"):
+                    send_fn.argtypes = [
+                        ctypes.c_void_p,
+                        ctypes.c_char_p,
+                        ctypes.POINTER(_pymtp.LIBMTP_File),
+                        ctypes.c_void_p,
+                        ctypes.c_void_p,
+                    ]
+                if hasattr(send_fn, "restype"):
+                    send_fn.restype = ctypes.c_int
+                ret = self._quiet(
+                    send_fn,
+                    self._mtp.device,
+                    local_source.encode("utf-8"),
+                    ctypes.pointer(metadata),
+                    None,
+                    None,
                 )
+                if ret != 0:
+                    self._quiet(self._mtp.debug_stack)
+                    raise _pymtp.CommandFailed()
                 # Invalidate caches -- file listing has changed.
                 self._file_cache = None
             return True, f"Copied to {_mtp_join(dest_folder, dest_filename)}"
         except Exception as exc:
             return False, f"MTP write failed:\n{self._fmt_exc(exc)}"
-        finally:
-            if temp_dir:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def get_file_size_from_path(
+        self, folder: str, filename: str
+    ) -> Tuple[bool, int | str]:
+        if not self._available:
+            return False, self._unavailable()
+        try:
+            with self._session():
+                entry = self._find_file(folder, filename)
+                if entry is None:
+                    return False, f"MTP file not found: {filename}"
+                size = int(getattr(entry, "filesize", 0))
+                if size < 0:
+                    size = 0
+                return True, size
+        except Exception as exc:
+            return False, f"MTP size lookup failed:\n{self._fmt_exc(exc)}"
 
     def _raw_delete_file(
         self, folder_path: str, filename: str
@@ -277,8 +305,27 @@ class MacMTPBackend(RCBackend):
     def _raw_probe(self, root: str) -> bool:
         if not self._available:
             return False
-        ok, _ = self._raw_list_folder(root)
-        return ok
+        try:
+            with self._session():
+                # Explicitly verify a device is currently discoverable.
+                devices = self._quiet(self._mtp.detect_devices)
+                if not devices:
+                    self._disconnect()
+                    return False
+
+                # Force a live folder read so disconnects are detected promptly.
+                self._folder_cache = None
+                # Keep probe lightweight: just confirm waypoint folder exists.
+                return self._waypoint_folder_exists()
+        except Exception:
+            return False
+
+    def _waypoint_folder_exists(self) -> bool:
+        for folder in self._all_folders():
+            name = _decode(getattr(folder, "name", "")).strip().lower()
+            if name == "waypoint":
+                return True
+        return False
 
     def _raw_get_status(self) -> Tuple[bool, str]:
         if not self._available:
@@ -352,8 +399,8 @@ class MacMTPBackend(RCBackend):
                 self._disconnect()
                 self._ensure_connected()
             else:
-                self._disconnect()
-                self._ensure_connected()
+                # Keep the existing session for non-disconnect errors.
+                raise
 
     @contextmanager
     def _session(self):
@@ -513,12 +560,31 @@ class MacMTPBackend(RCBackend):
 
     def _pull_to_path(self, item_id: int, local_dest: str) -> bool:
         """Pull by object id using pymtp, with mtp-getfile CLI fallback."""
+        def _has_file(path: str) -> bool:
+            return os.path.isfile(path) and os.path.getsize(path) > 0
+
+        # First attempt: use the current session directly.
         try:
             self._quiet(self._mtp.get_file_to_file, int(item_id), local_dest)
-            if os.path.isfile(local_dest) and os.path.getsize(local_dest) > 0:
+            if _has_file(local_dest):
                 return True
         except Exception:
             pass
+
+        # Second attempt: force session reset and retry once before fallback.
+        try:
+            self._disconnect()
+            self._ensure_connected()
+            self._quiet(self._mtp.get_file_to_file, int(item_id), local_dest)
+            if _has_file(local_dest):
+                return True
+        except Exception:
+            pass
+
+        # If mtp-getfile is not available, do not tear down the current
+        # session just for a failed read attempt.
+        if not shutil.which("mtp-getfile"):
+            return False
 
         # Some RC-2 / libmtp combinations fail reads via pymtp with CommandFailed
         # but succeed via mtp-getfile. Ensure pymtp releases its session before

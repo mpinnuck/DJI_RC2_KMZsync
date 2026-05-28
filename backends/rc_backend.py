@@ -166,10 +166,33 @@ class RCBackend(ABC):
 
     def is_connected(self, timeout_seconds: int | None = None) -> bool:
         """Best-effort connectivity probe. Must not raise."""
-        try:
-            return self._raw_probe(self._root())
-        except Exception:
+        root = self._root()
+        if not root:
             return False
+
+        # Allow one quick retry to smooth transient MTP probe blips.
+        max_attempts = 2
+        if timeout_seconds is None:
+            deadline = None
+        else:
+            deadline = time.monotonic() + max(float(timeout_seconds), 0.0)
+
+        attempt = 0
+        while attempt < max_attempts:
+            attempt += 1
+            try:
+                if self._raw_probe(root):
+                    return True
+            except Exception:
+                pass
+
+            if attempt >= max_attempts:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
+
+        return False
 
     def get_connection_mode(self) -> str:
         return self._raw_connection_mode()
@@ -321,6 +344,18 @@ class RCBackend(ABC):
         self, folder: str, filename: str
     ) -> Tuple[bool, bytes | str]:
         return self._pull_to_bytes(folder, filename)
+
+    def get_file_size_from_path(
+        self, folder: str, filename: str
+    ) -> Tuple[bool, int | str]:
+        """
+        Return file size in bytes for a file in a device folder.
+
+        Default implementation does not provide size metadata and returns
+        an explanatory message. Backends with native metadata access should
+        override this method.
+        """
+        return False, "File size metadata is not available for this backend."
 
     def delete_file(
         self, mission: RC2Mission, filename: str
