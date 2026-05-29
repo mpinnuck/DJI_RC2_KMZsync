@@ -332,11 +332,12 @@ Use this workflow to push a PC KMZ to RC-2, edit it on the RC, and pull the edit
   - On the next refresh, that row returns to normal background.
 17. Click the new mission to view the larger preview image in the right panel.
 18. Double-click the preview image to open a large popup map preview; the popup follows slot selection while open.
-19. Select the new mission target PC KMZ filename to overwrite.
-20. Click the right COPY button (copies the updated RC-2 kmz to the PC) to pull the edited mission back.
-21. Confirm the updated file on PC, the new RC mission is now associated with the new PC kmz, and review mapping timestamp.
-22. In the app, click Restore Dummy. This copies the PC `dummy.kmz` back to the dummy mission.
-23. On the RC, open the dummy mission, select "Adjust and open" if prompted, then return to the RC mission list and click Save for the dummy mission. The cycle is reset and ready for the next new-mission copy.
+19. Use the preview image to identify which new RC mission GUID corresponds to your intended PC KMZ target.
+20. Select the target PC KMZ filename to overwrite.
+21. Click the right COPY button (copies the updated RC-2 kmz to the PC) to pull the edited mission back.
+22. Confirm the updated file on PC and review Mission Mapping. This RC-to-PC copy-back updates the mission GUID-to-PC KMZ association and timestamp.
+23. In the app, click Restore Dummy. This copies the PC `dummy.kmz` back to the dummy mission.
+24. On the RC, open the dummy mission, select "Adjust and open" if prompted, then return to the RC mission list and click Save for the dummy mission. The cycle is reset and ready for the next new-mission copy.
 
 Preview note:
 
@@ -352,7 +353,8 @@ Dummy slot notes:
 
 Copy notes:
 - Upload and copy-back overwrite existing target filenames when present.
-- Copy-back updates mapping so latest source/target relationship is visible.
+- In this workflow, the preview image is the practical way to identify which new RC mission GUID matches your intended PC KMZ.
+- RC-to-PC copy-back to the selected target PC KMZ updates Mission Mapping so the latest GUID-to-PC KMZ relationship is visible.
 
 ## Diagnostics
 

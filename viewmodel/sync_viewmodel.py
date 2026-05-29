@@ -1,7 +1,6 @@
 import os
-import uuid
 from datetime import datetime
-from typing import Any, List, Tuple
+from typing import List, Tuple
 
 from backends.backend_factory import BackendFactory
 from config.config_manager import ConfigManager
@@ -65,15 +64,6 @@ class SyncViewModel:
     def _now_iso() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    def _ensure_copy_map_exists(self) -> None:
-        self._copy_map_service.ensure_copy_map_exists()
-
-    def _load_copy_map(self) -> dict[str, Any]:
-        return self._copy_map_service.load_copy_map()
-
-    def _save_copy_map(self, payload: dict[str, Any]) -> None:
-        self._copy_map_service.save_copy_map(payload)
-
     def _record_copy_mapping(self, source: KMZFile, mission: RC2Mission, dest_filename: str) -> None:
         now = self._now_iso()
         self._copy_map_service.record_mapping(
@@ -95,19 +85,6 @@ class SyncViewModel:
     # ------------------------------------------------------------------
     def _is_device_backend_active(self) -> bool:
         return self._rc_backend.get_connection_mode().strip().upper() in {"MTP", "ADB"}
-
-    @staticmethod
-    def _adb_remote_root(path: str) -> str:
-        raw = path.strip()[4:].strip()
-        if not raw:
-            return SyncViewModel.DEFAULT_ADB_RC2_ROOT[4:]
-        if not raw.startswith("/"):
-            raw = f"/{raw}"
-        return raw.replace("\\", "/")
-
-    @staticmethod
-    def _is_rc2_slot_name(name: str) -> bool:
-        return name.strip().lower() not in {"capability", "map_preview"}
 
     def clear_stale_preview_cache(self) -> None:
         root = (self._config.rc2_folder or "").strip()
@@ -198,19 +175,6 @@ class SyncViewModel:
             diagnose=self.diagnose_rc2_connection,
             set_rc2_folder=self.set_rc2_folder,
         )
-
-    def write_waypoint_text_file(self, filename: str = "temp.txt", content: str = "temp") -> Tuple[bool, str]:
-        """Write a small text file into the configured waypoint root."""
-        root = (self._config.rc2_folder or "").strip()
-        name = (filename or "").strip()
-        if not root:
-            return False, "RC-2 root is not configured."
-        if not name:
-            return False, "Filename is required."
-        if any(sep in name for sep in ("/", "\\")):
-            return False, "Filename must not include path separators."
-
-        return self._rc_backend.write_text_file(root, name, content)
 
     # ------------------------------------------------------------------
     # Properties (forwarded from config for convenience)
@@ -369,14 +333,6 @@ class SyncViewModel:
             record_copy_mapping=self._record_copy_mapping,
         )
 
-    def _prepare_new_mission_target(self) -> Tuple[bool, RC2Mission | str]:
-        new_guid = str(uuid.uuid4()).upper()
-        root = (self._config.rc2_folder or "").strip()
-        ok, full_folder = self._rc_backend.create_slot_folder(root, new_guid)
-        if not ok:
-            return False, f"Failed to create slot folder:\n{full_folder}"
-        return True, RC2Mission(guid=new_guid, kmz_name="", full_folder_path=full_folder)
-
     def _verify_mtp_copy_via_pull(
         self,
         mission: RC2Mission,
@@ -397,18 +353,6 @@ class SyncViewModel:
 
     def _read_slot_file_bytes(self, mission: RC2Mission, filename: str) -> Tuple[bool, bytes | str]:
         return self._rc_backend.read_file_bytes(mission, filename)
-
-    def _list_folder_items_with_type(self, folder_path: str) -> Tuple[bool, List[Tuple[str, bool, str]] | str]:
-        if not self._is_device_backend_active():
-            return False, "RC-2 backend is not active. Waiting for device detection."
-
-        return self._rc_backend.list_folder_items(folder_path)
-
-    def _read_file_bytes_from_folder(self, folder_path: str, filename: str) -> Tuple[bool, bytes | str]:
-        if not self._is_device_backend_active():
-            return False, "RC-2 backend is not active. Waiting for device detection."
-
-        return self._rc_backend.read_file_bytes_from_path(folder_path, filename)
 
     def _inspect_metadata_history_candidates(self, mission: RC2Mission, kmz_name: str) -> List[str]:
         return self._rc_backend.inspect_metadata_history_candidates(

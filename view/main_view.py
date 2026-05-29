@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v3.7"
+_APP_VERSION = "v3.8"
 
 
 try:
@@ -689,7 +689,7 @@ class MainView:
         ).pack(anchor=tk.W)
         tk.Label(
             top_frame,
-            text="larger image for easier location identification",
+            text="Double click for larger image and easier location identification",
             bg=_PANEL_BG,
             fg=_TEXT_DIM,
             font=_FONT_SMALL,
