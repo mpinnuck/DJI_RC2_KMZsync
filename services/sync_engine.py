@@ -12,6 +12,30 @@ from model.rc2_mission import RC2Mission
 class SyncEngine:
     """Orchestrates high-level sync workflows between PC and RC mission slots."""
 
+    @staticmethod
+    def resolve_destination_filename(rc_backend, mission: RC2Mission) -> tuple[str, bool]:
+        """
+        Resolve destination filename using live slot contents when possible.
+
+        Returns (dest_filename, slot_has_existing_kmz).
+        """
+        fallback = (mission.kmz_name or "").strip() or f"{mission.guid}.kmz"
+        try:
+            ok_list, listed = rc_backend.list_slot_files(mission)
+        except Exception:
+            return fallback, bool((mission.kmz_name or "").strip())
+
+        if not ok_list:
+            return fallback, bool((mission.kmz_name or "").strip())
+
+        names = listed if isinstance(listed, list) else []
+        kmz_candidates = sorted(
+            [name for name in names if str(name).strip().lower().endswith(".kmz")]
+        )
+        if kmz_candidates:
+            return kmz_candidates[0], True
+        return f"{mission.guid}.kmz", False
+
     def execute_copy(
         self,
         *,
@@ -23,7 +47,7 @@ class SyncEngine:
         clear_preview_cache_for_guid: Callable[[str], None],
     ) -> tuple[bool, str]:
         target_mission = mission
-        dest_filename = mission.kmz_name if mission.kmz_name else f"{mission.guid}.kmz"
+        dest_filename, _ = self.resolve_destination_filename(rc_backend, target_mission)
 
         if not os.path.isfile(kmz_file.full_path):
             return False, f"Source file not found:\n{kmz_file.full_path}"
@@ -110,7 +134,7 @@ class SyncEngine:
     def confirm_copy_message(mission: RC2Mission, kmz_file: KMZFile) -> str:
         dest_filename = mission.kmz_name if mission.kmz_name else f"{mission.guid}.kmz"
         return (
-            f"Overwrite mission:\n"
+            f"Copy mission into slot:\n"
             f"  {mission.guid}\n\n"
             f"With source file:\n"
             f"  {kmz_file.filename}\n\n"

@@ -25,7 +25,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -215,41 +214,88 @@ class MacMTPBackend(RCBackend):
                     int(folder.folder_id), dest_filename
                 )
                 if existing is not None:
-                    self._quiet(self._mtp.delete_object, int(existing.item_id))
+                    try:
+                        self._quiet(self._mtp.delete_object, int(existing.item_id))
+                    except Exception as exc:
+                        # Stale item IDs can occur with lagging MTP indices.
+                        # Continue and let the subsequent write proceed.
+                        _LOG.debug(
+                            "Pre-write delete failed for %s: %s",
+                            dest_filename,
+                            self._fmt_exc(exc),
+                        )
+                    # Deletions can be asynchronous over MTP; poll briefly so
+                    # the immediate upload does not race the old object state.
+                    self._file_cache = None
+                    self._files_by_parent_cache = None
+                    delete_deadline = time.monotonic() + 2.5
+                    while time.monotonic() < delete_deadline:
+                        if self._find_file_in_folder(int(folder.folder_id), dest_filename) is None:
+                            break
+                        time.sleep(0.1)
+                        self._file_cache = None
+                        self._files_by_parent_cache = None
 
-                filename_bytes = dest_filename.encode("utf-8")
-                filetype = self._quiet(self._mtp.find_filetype, local_source)
-                filesize = os.stat(local_source).st_size
-                metadata = _pymtp.LIBMTP_File(
-                    filename=filename_bytes,
-                    filetype=filetype,
-                    filesize=filesize,
-                )
-
-                metadata.parent_id = int(folder.folder_id)
-                metadata.storage_id = int(folder.storage_id)
                 send_fn = self._mtp.mtp.LIBMTP_Send_File_From_File
-                if hasattr(send_fn, "argtypes"):
-                    send_fn.argtypes = [
-                        ctypes.c_void_p,
-                        ctypes.c_char_p,
-                        ctypes.POINTER(_pymtp.LIBMTP_File),
-                        ctypes.c_void_p,
-                        ctypes.c_void_p,
-                    ]
-                if hasattr(send_fn, "restype"):
-                    send_fn.restype = ctypes.c_int
-                ret = self._quiet(
-                    send_fn,
-                    self._mtp.device,
-                    local_source.encode("utf-8"),
-                    ctypes.pointer(metadata),
-                    None,
-                    None,
-                )
-                if ret != 0:
-                    self._quiet(self._mtp.debug_stack)
-                    raise _pymtp.CommandFailed()
+
+                def _send_once(target_folder) -> int:
+                    filetype = self._quiet(self._mtp.find_filetype, local_source)
+                    filesize = os.stat(local_source).st_size
+                    filename_bytes = dest_filename.encode("utf-8")
+                    metadata = _pymtp.LIBMTP_File(
+                        filename=filename_bytes,
+                        filetype=filetype,
+                        filesize=filesize,
+                    )
+                    metadata.parent_id = int(target_folder.folder_id)
+                    metadata.storage_id = int(target_folder.storage_id)
+                    return self._quiet(
+                        send_fn,
+                        self._mtp.device,
+                        local_source.encode("utf-8"),
+                        ctypes.pointer(metadata),
+                        None,
+                        None,
+                    )
+
+                first_ret = _send_once(folder)
+                if first_ret != 0:
+                    try:
+                        self._quiet(self._mtp.debug_stack)
+                    except Exception:
+                        pass
+
+                    # A stale long-lived session can fail writes; reconnect and
+                    # retry once with freshly resolved folder metadata.
+                    self._disconnect()
+                    self._ensure_connected()
+                    folder_retry = self._resolve_folder(dest_folder)
+                    if folder_retry is None:
+                        raise RuntimeError(
+                            f"Destination folder not found after reconnect: {dest_folder}"
+                        )
+
+                    existing_retry = self._find_file_in_folder(
+                        int(folder_retry.folder_id), dest_filename
+                    )
+                    if existing_retry is not None:
+                        try:
+                            self._quiet(self._mtp.delete_object, int(existing_retry.item_id))
+                        except Exception:
+                            pass
+
+                    retry_ret = _send_once(folder_retry)
+                    if retry_ret != 0:
+                        try:
+                            self._quiet(self._mtp.debug_stack)
+                        except Exception:
+                            pass
+                        raise RuntimeError(
+                            "LIBMTP_Send_File_From_File returned "
+                            f"{first_ret} (initial) and {retry_ret} (after reconnect) "
+                            f"for '{os.path.basename(local_source)}' "
+                            f"to '{dest_filename}'"
+                        )
                 # Invalidate caches -- file listing has changed.
                 self._file_cache = None
                 self._files_by_parent_cache = None

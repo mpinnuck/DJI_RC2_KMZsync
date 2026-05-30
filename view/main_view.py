@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v3.8"
+_APP_VERSION = "v3.9"
 
 
 try:
@@ -768,15 +768,15 @@ class MainView:
                 return
             target_label = "dummy slot"
 
-        dest_filename = mission.kmz_name if mission.kmz_name else f"{mission.guid}.kmz"
+        dest_filename, slot_has_existing_kmz = self._vm.resolve_copy_destination_filename(mission)
         self._log(f"Copy requested: {kmz_file.filename} -> {target_label} {mission.guid}", level="INFO")
         self._log(
             f"Copy started: source={kmz_file.full_path} | destination={mission.full_folder_path}\\{dest_filename}",
             level="INFO",
         )
-        if mission.kmz_name:
+        if slot_has_existing_kmz:
             self._log(
-                f"Target slot contains '{mission.kmz_name}'. Attempting overwrite.",
+                f"Target slot contains '{dest_filename}'. Attempting overwrite.",
                 level="INFO",
             )
         self._log(self._vm.confirm_copy_message(mission, kmz_file).replace("\n", " | "), level="INFO")
@@ -1477,10 +1477,13 @@ class MainView:
 
                 refreshed, elapsed_ms, attempt, worker_error = payload[2], payload[3], payload[4], payload[5]
                 updated = 0
+                failed_guids: list[str] = []
                 for guid, data in refreshed.items():
                     if data:
                         self._last_preview_data[guid] = data
                         updated += 1
+                    else:
+                        failed_guids.append(guid)
 
                 if updated > 0:
                     self._render_rc2_tree()
@@ -1495,19 +1498,25 @@ class MainView:
                     level="DEBUG",
                 )
 
-                if (not worker_error) and refreshed and updated == 0 and attempt < 3:
+                # Retry only failed GUIDs once after the first attempt.
+                if refreshed and failed_guids and attempt == 1:
                     self._log(
-                        f"Background preview fetch returned no images; retrying ({attempt + 1}/3).",
-                        level="WARN",
+                        f"Background preview fetch had {len(failed_guids)} failed mission(s); retrying failed list (attempt 2/2).",
+                        level="DEBUG",
                     )
-                    retry_missions = [m for m in self._last_rc2_missions if m.guid in refreshed]
+                    retry_missions = [m for m in self._last_rc2_missions if m.guid in set(failed_guids)]
                     if retry_missions:
                         self._start_background_preview_fetch(
                             serial=serial,
                             missions=retry_missions,
                             preview_data=self._last_preview_data,
-                            attempt=attempt + 1,
+                            attempt=2,
                         )
+                elif refreshed and failed_guids and attempt >= 2:
+                    self._log(
+                        f"Background preview fetch still missing {len(failed_guids)} mission(s) after retry.",
+                        level="WARN",
+                    )
                 continue
 
             if kind == "rc_retry":

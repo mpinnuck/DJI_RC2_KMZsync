@@ -314,6 +314,13 @@ class SyncViewModel:
             clear_preview_cache_for_guid=self.clear_preview_cache_for_guid,
         )
 
+    def resolve_copy_destination_filename(
+        self,
+        mission: RC2Mission,
+    ) -> tuple[str, bool]:
+        """Return (dest_filename, slot_has_existing_kmz) using live slot state when available."""
+        return self._sync_engine.resolve_destination_filename(self._rc_backend, mission)
+
     def execute_copy_from_mission(
         self,
         mission: RC2Mission,
