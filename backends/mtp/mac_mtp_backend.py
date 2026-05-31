@@ -127,6 +127,10 @@ class MacMTPBackend(RCBackend):
         self._connected = False
         self._prefer_cli_pull = False
         self._connection_lock = threading.RLock()
+        self._last_transfer_monotonic: float | None = None
+        self._transfer_reconnect_idle_seconds = float(
+            os.environ.get("DJIRC2KMZSYNC_MTP_TRANSFER_RECONNECT_IDLE_SECONDS", "15")
+        )
         # Folder and file listing caches valid for the life of one connection.
         self._folder_cache: list | None = None
         self._folders_by_parent_cache: dict[int, list] | None = None
@@ -186,11 +190,25 @@ class MacMTPBackend(RCBackend):
             return False, self._unavailable()
         try:
             with self._session():
+                self._refresh_session_before_transfer("read")
                 entry = self._find_file(folder_path, filename)
                 if entry is None:
                     return False, f"MTP file not found: {filename}"
-                if not self._pull_to_path(int(entry.item_id), local_dest):
+                first_item_id = int(entry.item_id)
+                if self._pull_to_path(first_item_id, local_dest):
+                    self._mark_transfer_activity()
+                    return True, local_dest
+
+                # Re-resolve the item ID in a fresh session before a final pull.
+                self._disconnect()
+                self._ensure_connected()
+                entry_retry = self._find_file(folder_path, filename)
+                if entry_retry is None:
+                    return False, f"MTP file not found after reconnect: {filename}"
+                retry_item_id = int(entry_retry.item_id)
+                if not self._pull_to_path(retry_item_id, local_dest):
                     return False, f"MTP pull failed for {filename}"
+                self._mark_transfer_activity()
             return True, local_dest
         except Exception as exc:
             return False, f"MTP read failed:\n{self._fmt_exc(exc)}"
@@ -205,6 +223,7 @@ class MacMTPBackend(RCBackend):
 
         try:
             with self._session():
+                self._refresh_session_before_transfer("write")
                 folder = self._resolve_folder(dest_folder)
                 if folder is None:
                     return False, f"Destination folder not found: {dest_folder}"
@@ -228,13 +247,7 @@ class MacMTPBackend(RCBackend):
                     # the immediate upload does not race the old object state.
                     self._file_cache = None
                     self._files_by_parent_cache = None
-                    delete_deadline = time.monotonic() + 2.5
-                    while time.monotonic() < delete_deadline:
-                        if self._find_file_in_folder(int(folder.folder_id), dest_filename) is None:
-                            break
-                        time.sleep(0.1)
-                        self._file_cache = None
-                        self._files_by_parent_cache = None
+                    self._wait_for_file_delete(int(folder.folder_id), dest_filename)
 
                 send_fn = self._mtp.mtp.LIBMTP_Send_File_From_File
 
@@ -283,6 +296,9 @@ class MacMTPBackend(RCBackend):
                             self._quiet(self._mtp.delete_object, int(existing_retry.item_id))
                         except Exception:
                             pass
+                        self._file_cache = None
+                        self._files_by_parent_cache = None
+                        self._wait_for_file_delete(int(folder_retry.folder_id), dest_filename)
 
                     retry_ret = _send_once(folder_retry)
                     if retry_ret != 0:
@@ -299,6 +315,7 @@ class MacMTPBackend(RCBackend):
                 # Invalidate caches -- file listing has changed.
                 self._file_cache = None
                 self._files_by_parent_cache = None
+                self._mark_transfer_activity()
             return True, f"Copied to {_mtp_join(dest_folder, dest_filename)}"
         except Exception as exc:
             return False, f"MTP write failed:\n{self._fmt_exc(exc)}"
@@ -608,6 +625,32 @@ class MacMTPBackend(RCBackend):
         self._files_by_parent_cache = None
         self._logged_global_file_index = False
         self._prefer_cli_pull = False
+
+    def _mark_transfer_activity(self) -> None:
+        self._last_transfer_monotonic = time.monotonic()
+
+    def _refresh_session_before_transfer(self, op_name: str) -> None:
+        if self._last_transfer_monotonic is None:
+            return
+        idle_for = time.monotonic() - self._last_transfer_monotonic
+        if idle_for < self._transfer_reconnect_idle_seconds:
+            return
+        _LOG.debug(
+            "MTP transfer preflight reconnect for %s after %.1fs idle.",
+            op_name,
+            idle_for,
+        )
+        self._disconnect()
+        self._ensure_connected()
+
+    def _wait_for_file_delete(self, folder_id: int, filename: str, timeout: float = 2.5) -> None:
+        delete_deadline = time.monotonic() + timeout
+        while time.monotonic() < delete_deadline:
+            if self._find_file_in_folder(folder_id, filename) is None:
+                return
+            time.sleep(0.1)
+            self._file_cache = None
+            self._files_by_parent_cache = None
 
     def _ensure_connected(self) -> None:
         if self._mtp is None:
