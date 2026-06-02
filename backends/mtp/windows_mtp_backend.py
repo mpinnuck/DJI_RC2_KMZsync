@@ -272,6 +272,44 @@ Write-Output $destPath
 
         return ok, out
 
+    def get_file_size_from_path(
+        self, folder: str, filename: str
+    ) -> Tuple[bool, int | str]:
+        script = self._mtp_script(
+            folder,
+            f"""
+$filename = {_ps_quote(filename)}
+$item = $current.Items() | Where-Object {{ $_.Name -eq $filename -and -not $_.IsFolder }} | Select-Object -First 1
+if (-not $item) {{
+    throw "MTP file not found: $filename"
+}}
+
+$size = [int64]0
+try {{
+    $size = [int64]$item.Size
+}} catch {{
+    throw "MTP size metadata unavailable for $filename"
+}}
+
+if ($size -lt 0) {{ $size = 0 }}
+Write-Output $size
+""",
+        )
+        ok, out = self._run_mtp_ps(script, timeout_seconds=_MTP_COPY_TIMEOUT)
+        if not ok:
+            return False, f"MTP size lookup failed:\n{out}"
+
+        text = (out or "").strip()
+        if not text:
+            return False, "MTP size lookup failed:\nNo size returned."
+
+        size_text = text.splitlines()[-1].strip().replace(",", "")
+        try:
+            size = int(size_text)
+        except ValueError:
+            return False, f"MTP size lookup returned invalid value:\n{text}"
+        return True, max(size, 0)
+
     def _raw_delete_file(
         self, folder_path: str, filename: str
     ) -> Tuple[bool, str]:
