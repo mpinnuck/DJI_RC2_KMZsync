@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 import time
 import uuid
@@ -41,6 +42,14 @@ from services.mtp_date_normalizer import normalize_mtp_modify_date
 
 # Folders present in the waypoint root that are not mission slots.
 _NON_MISSION_FOLDERS = frozenset({"capability", "map_preview"})
+
+_GUID_FOLDER_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{12}$"
+)
 
 # Standard preview image suffixes in preference order.
 _PREVIEW_SUFFIXES = (".jpg", ".jpeg", ".png")
@@ -234,6 +243,8 @@ class RCBackend(ABC):
                 slot_name = str(row.get("Name") or "").strip()
                 if not slot_name:
                     continue
+                if not _is_guid_folder_name(slot_name):
+                    continue
                 kmz_name = str(row.get("KMZName") or "").strip()
                 last_modified = normalize_mtp_modify_date(
                     str(row.get("ModifyDateDetail") or "")
@@ -245,7 +256,7 @@ class RCBackend(ABC):
                     full_folder_path=_mtp_join(root, slot_name),
                     last_modified=last_modified,
                 ))
-            return missions, None
+            return _dedupe_missions_by_guid(missions), None
 
         # Per-slot fallback enumeration.
         ok, result = self._raw_list_folder(root)
@@ -261,7 +272,9 @@ class RCBackend(ABC):
         slot_entries = sorted(
             [
                 (name, modified) for name, is_folder, modified in items
-                if is_folder and name.strip().lower() not in _NON_MISSION_FOLDERS
+                if is_folder
+                and name.strip().lower() not in _NON_MISSION_FOLDERS
+                and _is_guid_folder_name(name)
             ],
             key=lambda t: t[0],
         )
@@ -290,7 +303,7 @@ class RCBackend(ABC):
                 last_modified=last_modified,
             ))
 
-        return missions, None
+        return _dedupe_missions_by_guid(missions), None
 
     def _raw_list_missions_bulk(
         self, root: str
@@ -447,10 +460,8 @@ class RCBackend(ABC):
     # ------------------------------------------------------------------
 
     def create_slot_folder(self, root: str, guid: str) -> Tuple[bool, str]:
-        ok, result = self._raw_create_folder(root, guid)
-        if not ok:
-            return False, f"Failed to create slot folder:\n{result}"
-        return True, result
+        del root, guid
+        return False, "Creating RC-2 mission folders is disabled. Copy KMZ files only into existing GUID slots."
 
     def delete_mission(self, mission: RC2Mission) -> Tuple[bool, str]:
         ok, out = self._raw_delete_folder(mission.full_folder_path)
@@ -923,6 +934,35 @@ def _path_scheme(path: str) -> str:
     if sep <= 0:
         return ""
     return cleaned[:sep].strip().lower()
+
+
+def _dedupe_missions_by_guid(missions: List[RC2Mission]) -> List[RC2Mission]:
+    deduped: Dict[str, RC2Mission] = {}
+    ordered_keys: List[str] = []
+
+    for mission in missions:
+        raw_guid = (mission.guid or "").strip()
+        if not raw_guid:
+            continue
+
+        key = raw_guid.lower()
+        existing = deduped.get(key)
+        if existing is None:
+            deduped[key] = mission
+            ordered_keys.append(key)
+            continue
+
+        # Prefer rows that contain a KMZ name when duplicate shell entries are returned.
+        has_kmz = bool((mission.kmz_name or "").strip())
+        existing_has_kmz = bool((existing.kmz_name or "").strip())
+        if has_kmz and not existing_has_kmz:
+            deduped[key] = mission
+
+    return [deduped[key] for key in ordered_keys]
+
+
+def _is_guid_folder_name(name: str) -> bool:
+    return bool(_GUID_FOLDER_RE.fullmatch((name or "").strip()))
 
 
 def _expand_folder_candidates(

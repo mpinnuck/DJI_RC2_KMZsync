@@ -1,5 +1,6 @@
 import os
 import queue
+import re
 import threading
 import time
 import traceback
@@ -8,7 +9,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v3.11"
+_APP_VERSION = "v3.12"
 
 
 try:
@@ -47,6 +48,13 @@ _FONT_BOLD  = ("Segoe UI", 10, "bold")
 _FONT_TITLE = ("Segoe UI", 11, "bold")
 _FONT_SMALL = ("Segoe UI", 8)
 _INSPECT_TIMEOUT_SECONDS = 45
+_GUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{12}$"
+)
 
 
 class MainView:
@@ -1627,6 +1635,35 @@ class MainView:
         last_error: str | None,
         preview_data: dict[str, bytes | None],
     ) -> None:
+        deduped_missions: list[RC2Mission] = []
+        by_guid: dict[str, RC2Mission] = {}
+        duplicate_guids: list[str] = []
+
+        for mission in missions:
+            guid = (mission.guid or "").strip()
+            if not guid:
+                continue
+
+            key = guid.lower()
+            existing = by_guid.get(key)
+            if existing is None:
+                by_guid[key] = mission
+                deduped_missions.append(mission)
+                continue
+
+            if guid not in duplicate_guids:
+                duplicate_guids.append(guid)
+
+            has_kmz = bool((mission.kmz_name or "").strip())
+            existing_has_kmz = bool((existing.kmz_name or "").strip())
+            if has_kmz and not existing_has_kmz:
+                by_guid[key] = mission
+                for idx, current in enumerate(deduped_missions):
+                    if (current.guid or "").strip().lower() == key:
+                        deduped_missions[idx] = mission
+                        break
+
+        missions = deduped_missions
         current_guids = {m.guid for m in missions}
         is_success = not bool(last_error)
         now = time.monotonic()
@@ -1664,6 +1701,13 @@ class MainView:
         self._last_rc2_missions = list(missions)
         self._last_preview_data = dict(preview_data)
         self._render_rc2_tree()
+
+        if duplicate_guids:
+            joined = ", ".join(sorted(duplicate_guids))
+            self._log(
+                f"Duplicate RC-2 slot rows collapsed during refresh: {joined}",
+                level="WARN",
+            )
 
         count = len(missions)
         active_filter = self._rc2_filter_var.get().strip()
@@ -1858,11 +1902,7 @@ class MainView:
         if not sel:
             return None
         guid = str(sel[0])
-        mission = self._missions_by_guid.get(guid)
-        if mission is not None:
-            return mission
-        folder_path = os.path.join(self._vm.rc2_folder, guid)
-        return RC2Mission(guid=guid, kmz_name="", full_folder_path=folder_path)
+        return self._missions_by_guid.get(guid)
 
     def _on_rc2_selection_changed(self, _event=None) -> None:
         mission = self._selected_mission()
@@ -1905,8 +1945,10 @@ class MainView:
             if mission is not None:
                 return mission
 
-            folder_path = os.path.join(self._vm.rc2_folder, saved_guid)
-            return RC2Mission(guid=saved_guid, kmz_name="", full_folder_path=folder_path)
+            # Do not fabricate mission objects from stale/non-slot saved values.
+            if not _GUID_RE.fullmatch(saved_guid):
+                return None
+            return None
 
         return self._selected_mission()
 

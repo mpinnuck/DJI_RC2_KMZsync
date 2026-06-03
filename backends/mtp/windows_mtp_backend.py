@@ -370,15 +370,20 @@ Write-Output "DELETED"
 
         script = self._mtp_script(
             parent_path,
-            f"""
+            _MTP_SILENT_DELETE_ADDTYPE
+            + f"""
 $folderName = {_ps_quote(folder_name)}
 $item = $current.Items() | Where-Object {{ $_.Name -eq $folderName -and $_.IsFolder }} | Select-Object -First 1
 if (-not $item) {{
     throw "Folder not found: $folderName"
 }}
-$item.InvokeVerb('delete')
+[MtpFileOp]::SilentDelete($item)
 $deadline = (Get-Date).AddSeconds(15)
 do {{
+    $current = $shell.Namespace(17)
+    foreach ($seg in $segments) {{
+        $current = ($current.Items() | Where-Object {{ $_.Name -eq $seg }} | Select-Object -First 1).GetFolder
+    }}
     $remaining = $current.Items() | Where-Object {{ $_.Name -eq $folderName -and $_.IsFolder }} | Select-Object -First 1
     if (-not $remaining) {{ break }}
     [System.Threading.Thread]::Sleep(200)
