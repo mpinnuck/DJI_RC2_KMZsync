@@ -8,7 +8,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v3.10"
+_APP_VERSION = "v3.11"
 
 
 try:
@@ -402,13 +402,14 @@ class MainView:
             relief="flat",
             borderwidth=0,
             font=_FONT_SMALL,
-            state=tk.DISABLED,
+            state=tk.NORMAL,
         )
         self._log_text.bind("<Button-1>", self._focus_log)
         self._log_text.bind("<Control-a>", self._select_all_log)
         self._log_text.bind("<Control-A>", self._select_all_log)
         self._log_text.bind("<Control-c>", self._copy_selected_log)
         self._log_text.bind("<Control-C>", self._copy_selected_log)
+        self._log_text.bind("<Key>", self._block_log_editing)
         log_scroll = ttk.Scrollbar(log_body, orient="vertical", command=self._log_text.yview)
         self._log_text.configure(yscrollcommand=log_scroll.set)
         self._log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -524,6 +525,16 @@ class MainView:
         self._set_large_preview(None)
         self._set_status("Selections cleared.", colour=_TEXT_DIM)
         return "break"
+
+    @staticmethod
+    def _block_log_editing(event) -> str | None:
+        if event.keysym in {"BackSpace", "Delete", "Return", "KP_Enter", "Tab", "Insert"}:
+            return "break"
+        if event.state & 0x4 and event.keysym.lower() in {"v", "x"}:
+            return "break"
+        if event.char and event.char.isprintable():
+            return "break"
+        return None
 
     # ------------------------------------------------------------------
     # Path row helper
@@ -2200,16 +2211,12 @@ class MainView:
 
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] [{level}] {message}\n"
-        self._log_text.configure(state=tk.NORMAL)
         self._log_text.insert(tk.END, line)
         self._log_text.yview_moveto(1.0)
         self._log_text.see(tk.END)
-        self._log_text.configure(state=tk.DISABLED)
 
     def _clear_log(self) -> None:
-        self._log_text.configure(state=tk.NORMAL)
         self._log_text.delete("1.0", tk.END)
-        self._log_text.configure(state=tk.DISABLED)
         self._log("Button clicked: Clear Log", level="INFO")
         self._log("Log cleared.")
 

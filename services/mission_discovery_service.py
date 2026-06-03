@@ -35,19 +35,30 @@ class MissionDiscoveryService:
     ) -> tuple[bool, str, str | None]:
         scheme = BackendFactory.path_scheme(root)
         is_windows = platform.system().lower().startswith("win")
+        configured_status: str | None = None
 
         if root and scheme in {"adb", "mtp"}:
             ok, status = get_status()
             if ok:
                 return True, f"Configured RC-2 root is reachable via {scheme.upper()}: {root}", root
+            configured_status = status
 
         if root and BackendFactory.path_scheme(root) not in {"adb", "mtp"} and os.path.isdir(root):
             return True, f"RC-2 folder is reachable on disk: {root}", root
 
-        if is_windows:
-            mtp_root = detect_mtp_root()
-            if mtp_root:
-                return True, f"RC-2 is reachable via Explorer-style MTP access. Use {mtp_root} as the RC-2 root.", mtp_root
+        # On macOS, if the user intentionally configured MTP, keep diagnostics
+        # focused on that path and do not fall back to ADB checks.
+        if (not is_windows) and scheme == "mtp":
+            detail = configured_status or "Configured MTP root is not reachable."
+            return False, (
+                "RC-2 is not reachable on this macOS session via MTP. "
+                "Keep RC-2 root set to mtp:... and reconnect the controller if needed. "
+                f"MTP status: {detail}"
+            ), None
+
+        mtp_root = detect_mtp_root()
+        if mtp_root:
+            return True, f"RC-2 is reachable via Explorer-style MTP access. Use {mtp_root} as the RC-2 root.", mtp_root
 
         adb_ready, adb_message = get_adb_status()
         if adb_ready:

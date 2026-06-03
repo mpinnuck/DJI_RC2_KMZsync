@@ -44,12 +44,15 @@ from backends.rc_backend import (
 )
 from config.config_manager import ConfigManager
 from model.rc2_mission import RC2Mission
+from backends.mtp.file_operation import is_available as ifo_is_available
+from backends.mtp.file_operation import mtp_copy_silent
 from services.mtp_date_normalizer import normalize_mtp_modify_date
 
 
 _POWERSHELL_TIMEOUT = 30
 _MTP_LIST_TIMEOUT   = 120
 _MTP_COPY_TIMEOUT   = 30
+_MTP_COPY_COMPLETION_TIMEOUT = 30
 
 # ---------------------------------------------------------------------------
 # C# IFileOperation silent delete via PIDL.
@@ -257,6 +260,8 @@ Write-Output $destPath
         self, dest_folder: str, local_source: str, dest_filename: str
     ) -> Tuple[bool, str]:
         # Stage a renamed copy if source basename != dest_filename.
+        # The legacy Shell.Application copy path remains the primary route
+        # because it was the last known working implementation on this setup.
         source_to_copy = local_source
         temp_dir: str | None = None
         if os.path.basename(local_source) != dest_filename:
@@ -266,6 +271,8 @@ Write-Output $destPath
 
         try:
             ok, out = self._copy_to_mtp_folder(dest_folder, source_to_copy)
+            if not ok and ifo_is_available():
+                ok, out = mtp_copy_silent(local_source, dest_folder, dest_filename)
         finally:
             if temp_dir:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -635,7 +642,7 @@ foreach ($seg in $segments) {{
 $current.CopyHere($sourcePath, 0x4)
 
 # Step 3: wait for the file to appear (CopyHere is async on MTP).
-$copyDeadline = (Get-Date).AddSeconds(30)
+$copyDeadline = (Get-Date).AddSeconds({_MTP_COPY_COMPLETION_TIMEOUT})
 $copied = $null
 do {{
     [System.Threading.Thread]::Sleep(200)
