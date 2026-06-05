@@ -295,6 +295,20 @@ Example kmz_sync_config.json:
 }
 ```
 
+## macOS MTP Partial Reads
+
+When reading RC-2 waypoint KMZ files over MTP on macOS, some devices reject full-object reads (`GetObject` / `get_file_to_file`) but allow chunked partial reads (`GetPartialObject`).
+
+This app uses a partial-read-first strategy on macOS:
+
+- Try chunked `GetPartialObject` reads first.
+- Fall back to full `GetObject` reads only when needed.
+
+Why this matters:
+
+- Improves reliability for copy-back and preview retrieval on RC-2.
+- Avoids failures commonly seen when a full-object read is rejected.
+
 ## Build (PyInstaller, Windows and macOS)
 
 Windows:
