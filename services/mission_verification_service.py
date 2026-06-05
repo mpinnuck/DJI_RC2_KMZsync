@@ -34,8 +34,35 @@ class MissionVerificationService:
         size_tolerance_percent: float,
         size_tolerance_bytes: int,
     ) -> tuple[bool, str]:
-        _ = (size_tolerance_percent, size_tolerance_bytes)
         expected_size = os.path.getsize(source_path)
+
+        # Prefer metadata-based verification first because full MTP readback can
+        # fail transiently even after a successful write on unstable sessions.
+        ok_size, size_or_error = rc_backend.get_file_size_from_path(
+            mission.full_folder_path,
+            dest_filename,
+        )
+        if ok_size:
+            try:
+                detected_size_meta = int(size_or_error)
+            except (TypeError, ValueError):
+                detected_size_meta = -1
+
+            if detected_size_meta >= 0:
+                size_diff = abs(detected_size_meta - expected_size)
+                percent_diff = (
+                    (size_diff / float(expected_size) * 100.0)
+                    if expected_size > 0
+                    else (0.0 if detected_size_meta == 0 else 100.0)
+                )
+                tolerance_bytes = max(
+                    int(size_tolerance_bytes),
+                    int(round(expected_size * (float(size_tolerance_percent) / 100.0))),
+                )
+
+                if size_diff <= tolerance_bytes:
+                    return True, "ok"
+
         expected_hash = cls._file_sha256(source_path)
         ok_bytes, payload = rc_backend.read_file_bytes_from_path(
             mission.full_folder_path,
@@ -45,6 +72,7 @@ class MissionVerificationService:
             return False, (
                 "Unable to read destination file for verification.\n"
                 f"Expected size (source): {expected_size} bytes\n"
+                f"Metadata size check: {'ok' if ok_size else 'failed'} ({size_or_error})\n"
                 f"Read error: {payload}"
             )
 

@@ -98,6 +98,20 @@ After setup, normal PC to RC copy only requires selecting a PC KMZ and clicking 
 
 ## Build Quick Start
 
+## Zip Source Files
+
+Create a zip containing all tracked source files (including local uncommitted edits):
+
+```bash
+./zip_sources.sh
+```
+
+Output is written to:
+
+- `artifacts/source-archives/DJI_RC2_KMZsync-source-YYYYMMDD-HHMMSS.zip`
+
+Generated zip archives are ignored by git.
+
 Windows build:
 
 ```powershell
@@ -169,6 +183,16 @@ Optional tools:
 The app does not require ADB to run.
 - On Windows, it uses the built-in Explorer/Shell MTP interface.
 - On macOS, it uses libmtp/pymtp-based access.
+
+macOS note (important):
+- RC-2 waypoint files can reject standard MTP `GetObject` reads (`get_file_to_file`) while still allowing `GetPartialObject` reads.
+- The macOS backend uses chunked `GetPartialObject` reads first, then falls back to `GetObject` only when needed.
+- This avoids competing MTP sessions and resolves the intermittent copy-back/preview failures seen with CLI-based reads.
+- Install libmtp with:
+
+```bash
+brew install libmtp
+```
 
 Development/build dependencies:
 - pytest

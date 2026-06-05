@@ -21,6 +21,7 @@ dist/
 distm/
 build/
 *.egg-info/
+artifacts/source-archives/*.zip
 
 # Test coverage
 .coverage

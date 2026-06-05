@@ -5,11 +5,12 @@ import threading
 import time
 import traceback
 import io
+import logging
 import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 
-_APP_VERSION = "v3.12"
+_APP_VERSION = "v4.0"
 
 
 try:
@@ -95,6 +96,7 @@ class MainView:
         self._rc2_retry_delay_ms = self._vm.get_rc2_refresh_retry_interval_seconds() * 1000
         self._rc2_connected = False
         self._rc2_last_probe_connected: bool | None = None
+        self._rc2_probe_miss_streak = 0
         self._rc2_monitor_stop = threading.Event()
         self._rc2_monitor_thread: threading.Thread | None = None
         self._rc2_scan_lock = threading.Lock()
@@ -104,6 +106,9 @@ class MainView:
         self._busy_popup_progress: ttk.Progressbar | None = None
         self._adb_status_button: ttk.Button | None = None
         self._copy_in_progress = False
+        self._copy_progress_after_id: str | None = None
+        self._copy_progress_started_at = 0.0
+        self._copy_progress_operation = ""
         self._inspect_in_progress = False
         self._inspect_request_id = 0
         self._inspect_watchdog_after_id: str | None = None
@@ -112,12 +117,23 @@ class MainView:
         self._force_mapping_rerender_on_next_refresh_done = False
         self._refresh_pending = False
         self._preview_bg_in_progress = False
+        self._preview_retry_after_id: str | None = None
+        self._preview_retry_attempt = 0
+        self._preview_retry_pending_guids: set[str] = set()
+        self._preview_retry_delay_ms = max(2000, self._vm.get_rc2_refresh_retry_interval_seconds() * 1000)
+        self._preview_pause_for_copy = False
+        self._preview_settle_until = 0.0
         self._last_error_log_key: str | None = None
         self._last_error_log_time = 0.0
+        self._log_overwrite_marks: dict[str, tuple[str, str]] = {}
+        self._backend_log_handler: logging.Handler | None = None
+        self._backend_logger: logging.Logger | None = None
+        self._backend_logger_prev_propagate: bool | None = None
         self._setup_root()
         self._apply_styles()
         self._rc2_filter_var = tk.StringVar(value="")
         self._build_ui()
+        self._install_backend_log_bridge()
         self._install_button_click_logging()
         self._start_rc2_connection_monitor()
         # Ensure uncaught Tk callback exceptions are surfaced in the UI log.
@@ -145,6 +161,8 @@ class MainView:
 
     def _on_close(self) -> None:
         self._cancel_rc2_background_retry(reset_attempts=False)
+        self._cancel_preview_background_retry(reset_attempts=False)
+        self._stop_copy_progress()
         self._rc2_monitor_stop.set()
         self._flush_path_entries()
         if self._preview_popup is not None and self._preview_popup.winfo_exists():
@@ -157,12 +175,57 @@ class MainView:
             except Exception:
                 pass
             self._inspect_watchdog_after_id = None
+        self._remove_backend_log_bridge()
         self._hide_busy_popup()
         try:
             self._vm.shutdown()
         except Exception:
             pass
         self._root.destroy()
+
+    def _install_backend_log_bridge(self) -> None:
+        if self._backend_log_handler is not None:
+            return
+
+        logger = logging.getLogger("backends.mtp.mac_mtp_backend")
+
+        class _TkLogHandler(logging.Handler):
+            def __init__(self, outer: "MainView") -> None:
+                super().__init__(level=logging.WARNING)
+                self._outer = outer
+
+            def emit(self, record: logging.LogRecord) -> None:
+                try:
+                    level_name = (record.levelname or "INFO").upper()
+                    panel_level = "WARN" if level_name == "WARNING" else level_name
+                    message = record.getMessage()
+
+                    def _append() -> None:
+                        self._outer._log(message, level=panel_level)
+
+                    self._outer._root.after(0, _append)
+                except Exception:
+                    pass
+
+        handler = _TkLogHandler(self)
+        self._backend_logger_prev_propagate = logger.propagate
+        logger.propagate = False
+        logger.addHandler(handler)
+        self._backend_logger = logger
+        self._backend_log_handler = handler
+
+    def _remove_backend_log_bridge(self) -> None:
+        if self._backend_logger is None or self._backend_log_handler is None:
+            return
+        try:
+            self._backend_logger.removeHandler(self._backend_log_handler)
+        except Exception:
+            pass
+        if self._backend_logger_prev_propagate is not None:
+            self._backend_logger.propagate = self._backend_logger_prev_propagate
+        self._backend_log_handler = None
+        self._backend_logger = None
+        self._backend_logger_prev_propagate = None
 
     def _start_rc2_connection_monitor(self) -> None:
         if self._rc2_monitor_thread and self._rc2_monitor_thread.is_alive():
@@ -175,6 +238,7 @@ class MainView:
                 rc_io_busy = (
                     self._refresh_active
                     or self._rc2_retry_in_progress
+                    or self._preview_bg_in_progress
                     or self._copy_in_progress
                     or self._delete_in_progress
                     or self._inspect_in_progress
@@ -184,7 +248,8 @@ class MainView:
                     continue
 
                 try:
-                    connected = self._vm.is_rc2_connected(timeout_seconds=4)
+                    with self._rc2_scan_lock:
+                        connected = self._vm.is_rc2_connected(timeout_seconds=4)
                 except Exception:
                     connected = False
 
@@ -196,20 +261,39 @@ class MainView:
 
     def _on_rc2_probe_result(self, connected: bool) -> None:
         was_connected = self._rc2_last_probe_connected
-        self._rc2_last_probe_connected = connected
-        self._update_connection_mode(rc2_connected=connected)
+
+        if connected:
+            self._rc2_probe_miss_streak = 0
+            self._rc2_last_probe_connected = True
+            self._update_connection_mode(rc2_connected=True)
+
+            if was_connected is None:
+                return
+
+            if not was_connected:
+                self._log("RC-2 waypoint path detected. Triggering refresh.", level="INFO")
+                if self._busy or self._refresh_active:
+                    self._refresh_pending = True
+                    return
+                self._refresh()
+            return
+
+        # A single failed probe can happen transiently while macOS USB daemons
+        # race MTP. Require two consecutive misses before marking disconnected.
+        self._rc2_probe_miss_streak += 1
+        if was_connected and self._rc2_probe_miss_streak < 2:
+            self._log("RC-2 probe miss detected; waiting for confirmation.", level="DEBUG")
+            return
+
+        self._rc2_last_probe_connected = False
+        self._update_connection_mode(rc2_connected=False)
 
         if was_connected is None:
             return
 
-        if (not was_connected) and connected:
-            self._log("RC-2 waypoint path detected. Triggering refresh.", level="INFO")
-            if self._busy or self._refresh_active:
-                self._refresh_pending = True
-                return
-            self._refresh()
-        elif was_connected and (not connected):
+        if was_connected:
             self._log("RC-2 waypoint path no longer available.", level="WARN")
+            self._schedule_rc2_background_retry("monitor detected disconnect")
 
     def _flush_path_entries(self) -> None:
         """Persist any unsaved path-entry edits (e.g. paste without pressing Enter)."""
@@ -397,6 +481,8 @@ class MainView:
             command=lambda: self._inspect_selected_mission(deep=False),
         ).pack(side=tk.RIGHT, padx=(0, 6))
         ttk.Button(log_header, text="Clear Log", command=self._clear_log).pack(side=tk.RIGHT)
+        ttk.Button(log_header, text="Copy Log", command=self._copy_log_to_clipboard).pack(side=tk.RIGHT, padx=(0, 6))
+        ttk.Button(log_header, text="Save Log...", command=self._save_log_to_file).pack(side=tk.RIGHT, padx=(0, 6))
 
         log_body = tk.Frame(log_panel, bg=_PANEL_BG)
         log_body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -800,17 +886,20 @@ class MainView:
             )
         self._log(self._vm.confirm_copy_message(mission, kmz_file).replace("\n", " | "), level="INFO")
 
+        self._pause_preview_background_for_copy()
         self._set_busy(True, "Copying mission to RC-2...")
         self._set_status("Copy in progress...", colour=_TEXT_DIM)
         self._copy_in_progress = True
+        self._start_copy_progress("Copy to RC-2")
 
         def _worker() -> None:
             started = time.monotonic()
             try:
-                ok, msg = self._vm.execute_copy(
-                    mission,
-                    kmz_file,
-                )
+                with self._rc2_scan_lock:
+                    ok, msg = self._vm.execute_copy(
+                        mission,
+                        kmz_file,
+                    )
             except Exception as exc:
                 ok, msg = False, f"Unhandled copy error: {exc}"
             elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -847,14 +936,17 @@ class MainView:
             level="INFO",
         )
 
+        self._pause_preview_background_for_copy()
         self._set_busy(True, "Restoring dummy slot...")
         self._set_status("Restore dummy in progress...", colour=_TEXT_DIM)
         self._copy_in_progress = True
+        self._start_copy_progress("Restore dummy slot")
 
         def _worker() -> None:
             started = time.monotonic()
             try:
-                ok, msg = self._vm.execute_copy(mission, kmz_file)
+                with self._rc2_scan_lock:
+                    ok, msg = self._vm.execute_copy(mission, kmz_file)
             except Exception as exc:
                 ok, msg = False, f"Unhandled restore dummy error: {exc}"
             elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -911,14 +1003,17 @@ class MainView:
             target_name = target_kmz.filename
 
         self._log(f"Copy-back requested: mission {mission.guid} -> {target_name}", level="INFO")
+        self._pause_preview_background_for_copy()
         self._set_busy(True, "Copying mission back to PC...")
         self._set_status("Copy-back in progress...", colour=_TEXT_DIM)
         self._copy_in_progress = True
+        self._start_copy_progress("Copy-back to PC")
 
         def _worker() -> None:
             started = time.monotonic()
             try:
-                ok, msg = self._vm.execute_copy_from_mission(mission, target_kmz)
+                with self._rc2_scan_lock:
+                    ok, msg = self._vm.execute_copy_from_mission(mission, target_kmz)
             except Exception as exc:
                 ok, msg = False, f"Unhandled copy-back error: {exc}"
             elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -1005,20 +1100,62 @@ class MainView:
             operation = "copy_to_rc"
             ok, msg, elapsed_ms = latest
         self._copy_in_progress = False
+        self._stop_copy_progress()
         self._set_busy(False, "")
 
         if ok:
             if operation == "copy_back":
-                self._force_mapping_rerender_on_next_refresh_done = True
+                self._set_status(f"✔  {msg.splitlines()[0]}", colour=_SUCCESS)
+                self._log(msg.replace("\n", " | "), level="OK")
+                self._log(f"Copy completed in {elapsed_ms} ms", level="DEBUG")
+
+                # Copy-back does not modify RC slot contents; avoid expensive
+                # RC/MTP list refresh and only refresh local PC/mapping views.
+                files = self._vm.load_pc_kmz_files()
+                pc_error = self._vm.consume_last_error()
+                self._populate_pc_tree(files, pc_error)
+                self._refresh_mapping(rerender_rc2=True)
+                self._resume_preview_background_after_copy()
+                return
             self._set_status(f"✔  {msg.splitlines()[0]}", colour=_SUCCESS)
             self._log(msg.replace("\n", " | "), level="OK")
             self._log(f"Copy completed in {elapsed_ms} ms", level="DEBUG")
+            # RC writes can leave MTP unsettled briefly; defer preview pulls.
+            self._preview_settle_until = time.monotonic() + 45.0
+            self._log("Deferring preview background fetch for 45s after RC write.", level="DEBUG")
+            self._resume_preview_background_after_copy()
             self._refresh()
             return
 
         self._set_status("✘  Copy failed.", colour=_ERROR)
         self._log(msg.replace("\n", " | "), level="ERROR")
         self._log(f"Copy failed after {elapsed_ms} ms", level="DEBUG")
+
+        if self._copy_failure_indicates_disconnect(msg):
+            self._rc2_connected = False
+            self._rc2_last_probe_connected = False
+            self._rc2_probe_miss_streak = 2
+            self._update_connection_mode(rc2_connected=False)
+            self._schedule_rc2_background_retry("copy operation lost RC-2 connection")
+
+        # Always clear copy pause state after a copy attempt. If RC-2 is
+        # disconnected this will not restart preview fetch until reconnect.
+        self._resume_preview_background_after_copy()
+
+    @staticmethod
+    def _copy_failure_indicates_disconnect(message: str) -> bool:
+        text = (message or "").lower()
+        markers = (
+            "nodeviceconnected",
+            "no device connected",
+            "no devices/emulators found",
+            "mtp path not found",
+            "unable to initialize device",
+            "not connected",
+            "connection reset",
+            "device not found",
+        )
+        return any(marker in text for marker in markers)
 
     def _drain_delete_queue(self) -> None:
         latest = None
@@ -1287,6 +1424,7 @@ class MainView:
             return
 
         self._cancel_rc2_background_retry(reset_attempts=False)
+        self._cancel_preview_background_retry(reset_attempts=True)
         self._flush_path_entries()
 
         self._refresh_serial += 1
@@ -1389,6 +1527,8 @@ class MainView:
     ) -> None:
         if self._preview_bg_in_progress:
             return
+        if self._preview_pause_for_copy:
+            return
 
         missing = [mission for mission in missions if not preview_data.get(mission.guid)]
         if not missing:
@@ -1405,12 +1545,24 @@ class MainView:
             started = time.monotonic()
             refreshed: dict[str, bytes | None] = {}
             worker_error: str | None = None
+            paused = False
             try:
-                preview_paths = self._vm.get_all_mission_preview_paths(
-                    missing,
-                    allow_live_fetch=True,
-                )
-                for mission in missing:
+                total = len(missing)
+                for index, mission in enumerate(missing, start=1):
+                    if self._preview_pause_for_copy:
+                        paused = True
+                        break
+
+                    self._log(
+                        f"Background preview fetch step {index}/{total}: {mission.guid}",
+                        level="DEBUG",
+                    )
+                    with self._rc2_scan_lock:
+                        preview_paths = self._vm.get_all_mission_preview_paths(
+                            [mission],
+                            allow_live_fetch=True,
+                        )
+
                     path = preview_paths.get(mission.guid)
                     data: bytes | None = None
                     if path and os.path.isfile(path):
@@ -1424,10 +1576,119 @@ class MainView:
                 worker_error = str(exc)
             finally:
                 elapsed_ms = int((time.monotonic() - started) * 1000)
-                self._refresh_queue.put(("preview_bg", serial, refreshed, elapsed_ms, attempt, worker_error))
+                self._refresh_queue.put(("preview_bg", serial, refreshed, elapsed_ms, attempt, worker_error, paused))
 
         threading.Thread(target=_worker, daemon=True).start()
         self._root.after(50, self._drain_refresh_queue)
+
+    def _schedule_preview_background_retry(
+        self,
+        *,
+        serial: int,
+        failed_guids: list[str],
+        current_attempt: int,
+        reason: str,
+    ) -> None:
+        if serial != self._refresh_serial:
+            return
+        if not failed_guids:
+            return
+
+        self._preview_retry_pending_guids.update(failed_guids)
+        if self._preview_retry_after_id is not None:
+            return
+
+        next_attempt = current_attempt + 1
+        # Keep retries alive but progressively back off to reduce MTP churn.
+        delay_seconds = min(60, max(2, 5 * min(next_attempt, 6)))
+        self._preview_retry_delay_ms = delay_seconds * 1000
+        self._log(
+            f"Background preview retry queued in {int(self._preview_retry_delay_ms / 1000)}s for "
+            f"{len(self._preview_retry_pending_guids)} mission(s) (attempt {next_attempt}, {reason}).",
+            level="DEBUG",
+        )
+        self._preview_retry_after_id = self._root.after(
+            self._preview_retry_delay_ms,
+            lambda s=serial, a=next_attempt: self._run_scheduled_preview_retry(s, a),
+        )
+
+    def _cancel_preview_background_retry(self, reset_attempts: bool) -> None:
+        if self._preview_retry_after_id is not None:
+            try:
+                self._root.after_cancel(self._preview_retry_after_id)
+            except tk.TclError:
+                pass
+            self._preview_retry_after_id = None
+
+        if reset_attempts:
+            self._preview_retry_attempt = 0
+            self._preview_retry_pending_guids.clear()
+
+    def _run_scheduled_preview_retry(self, serial: int, attempt: int) -> None:
+        self._preview_retry_after_id = None
+        if serial != self._refresh_serial:
+            return
+
+        now = time.monotonic()
+        if now < self._preview_settle_until:
+            pending = list(self._preview_retry_pending_guids)
+            if pending:
+                remaining_ms = int(max(500, (self._preview_settle_until - now) * 1000))
+                self._log(
+                    f"Background preview retry delayed {int(remaining_ms / 1000)}s for post-write settle.",
+                    level="DEBUG",
+                )
+                self._preview_retry_after_id = self._root.after(
+                    remaining_ms,
+                    lambda s=serial, a=attempt: self._run_scheduled_preview_retry(s, a),
+                )
+            return
+
+        if self._preview_pause_for_copy:
+            self._schedule_preview_background_retry(
+                serial=serial,
+                failed_guids=list(self._preview_retry_pending_guids),
+                current_attempt=attempt - 1,
+                reason="copy activity",
+            )
+            return
+
+        if not self._rc2_connected:
+            self._schedule_preview_background_retry(
+                serial=serial,
+                failed_guids=list(self._preview_retry_pending_guids),
+                current_attempt=attempt - 1,
+                reason="RC-2 unavailable",
+            )
+            return
+
+        if self._refresh_active or self._busy or self._copy_in_progress or self._delete_in_progress or self._inspect_in_progress:
+            # Keep retrying in the background, but avoid fighting active UI work.
+            self._schedule_preview_background_retry(
+                serial=serial,
+                failed_guids=list(self._preview_retry_pending_guids),
+                current_attempt=attempt - 1,
+                reason="UI busy",
+            )
+            return
+
+        retry_guids = set(self._preview_retry_pending_guids)
+        if not retry_guids:
+            return
+
+        retry_missions = [m for m in self._last_rc2_missions if m.guid in retry_guids]
+        if not retry_missions:
+            self._preview_retry_pending_guids.clear()
+            return
+
+        self._preview_retry_attempt = max(self._preview_retry_attempt, attempt)
+        self._preview_retry_pending_guids.clear()
+        self._start_background_preview_fetch(
+            serial=serial,
+            missions=retry_missions,
+            preview_data=self._last_preview_data,
+            attempt=attempt,
+        )
 
     def _schedule_rc2_background_retry(self, reason: str) -> None:
         if self._rc2_retry_after_id is not None:
@@ -1495,6 +1756,7 @@ class MainView:
                     continue
 
                 refreshed, elapsed_ms, attempt, worker_error = payload[2], payload[3], payload[4], payload[5]
+                paused = bool(payload[6]) if len(payload) > 6 else False
                 updated = 0
                 failed_guids: list[str] = []
                 for guid, data in refreshed.items():
@@ -1517,25 +1779,26 @@ class MainView:
                     level="DEBUG",
                 )
 
-                # Retry only failed GUIDs once after the first attempt.
-                if refreshed and failed_guids and attempt == 1:
+                if paused:
                     self._log(
-                        f"Background preview fetch had {len(failed_guids)} failed mission(s); retrying failed list (attempt 2/2).",
+                        "Background preview fetch paused for copy activity.",
                         level="DEBUG",
                     )
-                    retry_missions = [m for m in self._last_rc2_missions if m.guid in set(failed_guids)]
-                    if retry_missions:
-                        self._start_background_preview_fetch(
-                            serial=serial,
-                            missions=retry_missions,
-                            preview_data=self._last_preview_data,
-                            attempt=2,
-                        )
-                elif refreshed and failed_guids and attempt >= 2:
+                    continue
+
+                if refreshed and failed_guids:
                     self._log(
-                        f"Background preview fetch still missing {len(failed_guids)} mission(s) after retry.",
+                        f"Background preview fetch still missing {len(failed_guids)} mission(s); keeping retry loop active.",
                         level="WARN",
                     )
+                    self._schedule_preview_background_retry(
+                        serial=serial,
+                        failed_guids=failed_guids,
+                        current_attempt=attempt,
+                        reason="previews still missing",
+                    )
+                elif refreshed:
+                    self._cancel_preview_background_retry(reset_attempts=True)
                 continue
 
             if kind == "rc_retry":
@@ -1592,6 +1855,7 @@ class MainView:
                     # Manual/initial refresh succeeded with RC reachable.
                     self._rc2_last_probe_connected = True
                     self._cancel_rc2_background_retry(reset_attempts=True)
+                    self._cancel_preview_background_retry(reset_attempts=True)
                 if not self._refresh_pc_loaded:
                     self._set_status("RC-2 missions loaded. Loading PC files...")
                 continue
@@ -1628,6 +1892,80 @@ class MainView:
 
         if self._refresh_active or self._rc2_retry_in_progress or self._preview_bg_in_progress:
             self._root.after(50, self._drain_refresh_queue)
+
+    def _pause_preview_background_for_copy(self) -> None:
+        self._preview_pause_for_copy = True
+        self._cancel_preview_background_retry(reset_attempts=False)
+        self._log("Preview background fetch paused during copy activity.", level="DEBUG")
+
+    def _resume_preview_background_after_copy(self) -> None:
+        self._preview_pause_for_copy = False
+        if self._refresh_active or self._copy_in_progress:
+            return
+        if not self._rc2_connected:
+            return
+
+        missing_missions = [
+            mission
+            for mission in self._last_rc2_missions
+            if not self._last_preview_data.get(mission.guid)
+        ]
+        if not missing_missions:
+            self._cancel_preview_background_retry(reset_attempts=True)
+            return
+
+        now = time.monotonic()
+        if now < self._preview_settle_until:
+            remaining_ms = int(max(500, (self._preview_settle_until - now) * 1000))
+            self._preview_retry_pending_guids.update(m.guid for m in missing_missions)
+            self._log(
+                f"Preview resume delayed {int(remaining_ms / 1000)}s for post-write settle.",
+                level="DEBUG",
+            )
+            if self._preview_retry_after_id is None:
+                next_attempt = max(1, self._preview_retry_attempt + 1)
+                self._preview_retry_after_id = self._root.after(
+                    remaining_ms,
+                    lambda s=self._refresh_serial, a=next_attempt: self._run_scheduled_preview_retry(s, a),
+                )
+            return
+
+        self._log(
+            f"Resuming background preview fetch after copy for {len(missing_missions)} mission(s).",
+            level="DEBUG",
+        )
+        self._start_background_preview_fetch(
+            serial=self._refresh_serial,
+            missions=missing_missions,
+            preview_data=self._last_preview_data,
+            attempt=max(1, self._preview_retry_attempt + 1),
+        )
+
+    def _start_copy_progress(self, operation: str) -> None:
+        self._stop_copy_progress()
+        self._copy_progress_operation = operation
+        self._copy_progress_started_at = time.monotonic()
+
+        def _tick() -> None:
+            self._copy_progress_after_id = None
+            if not self._copy_in_progress:
+                return
+            elapsed = int(max(0.0, time.monotonic() - self._copy_progress_started_at))
+            self._log(f"{self._copy_progress_operation} in progress... {elapsed}s elapsed", level="DEBUG")
+            self._copy_progress_after_id = self._root.after(10000, _tick)
+
+        self._copy_progress_after_id = self._root.after(10000, _tick)
+
+    def _stop_copy_progress(self) -> None:
+        if self._copy_progress_after_id is not None:
+            try:
+                self._root.after_cancel(self._copy_progress_after_id)
+            except tk.TclError:
+                pass
+            self._copy_progress_after_id = None
+        self._clear_log_overwrite("copy_progress")
+        self._copy_progress_started_at = 0.0
+        self._copy_progress_operation = ""
 
     def _populate_rc2_tree(
         self,
@@ -2242,7 +2580,25 @@ class MainView:
 
         self._refresh_preview_popup_image()
 
-    def _log(self, message: str, level: str = "INFO") -> None:
+    @staticmethod
+    def _log_mark_name(overwrite_key: str, suffix: str) -> str:
+        safe = re.sub(r"[^0-9A-Za-z_]+", "_", overwrite_key or "")
+        if not safe:
+            safe = "key"
+        return f"log_ow_{safe}_{suffix}"
+
+    def _clear_log_overwrite(self, overwrite_key: str) -> None:
+        marks = self._log_overwrite_marks.pop(overwrite_key, None)
+        if not marks:
+            return
+        start_mark, end_mark = marks
+        try:
+            self._log_text.mark_unset(start_mark)
+            self._log_text.mark_unset(end_mark)
+        except Exception:
+            pass
+
+    def _log(self, message: str, level: str = "INFO", overwrite_key: str | None = None) -> None:
         if level == "ERROR":
             key = message.strip()
             now = time.monotonic()
@@ -2253,12 +2609,45 @@ class MainView:
 
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] [{level}] {message}\n"
-        self._log_text.insert(tk.END, line)
+        if overwrite_key:
+            start_mark, end_mark = self._log_overwrite_marks.get(
+                overwrite_key,
+                (
+                    self._log_mark_name(overwrite_key, "s"),
+                    self._log_mark_name(overwrite_key, "e"),
+                ),
+            )
+            if overwrite_key in self._log_overwrite_marks:
+                try:
+                    start_idx = self._log_text.index(start_mark)
+                    end_idx = self._log_text.index(end_mark)
+                    self._log_text.delete(start_idx, end_idx)
+                    self._log_text.insert(start_idx, line)
+                    new_end_idx = self._log_text.index(f"{start_idx}+{len(line)}c")
+                    self._log_text.mark_set(start_mark, start_idx)
+                    self._log_text.mark_set(end_mark, new_end_idx)
+                except Exception:
+                    self._log_text.insert(tk.END, line)
+                    end_idx = self._log_text.index("end-1c")
+                    start_idx = self._log_text.index(f"{end_idx}-{len(line)}c")
+                    self._log_text.mark_set(start_mark, start_idx)
+                    self._log_text.mark_set(end_mark, end_idx)
+                self._log_overwrite_marks[overwrite_key] = (start_mark, end_mark)
+            else:
+                self._log_text.insert(tk.END, line)
+                end_idx = self._log_text.index("end-1c")
+                start_idx = self._log_text.index(f"{end_idx}-{len(line)}c")
+                self._log_text.mark_set(start_mark, start_idx)
+                self._log_text.mark_set(end_mark, end_idx)
+                self._log_overwrite_marks[overwrite_key] = (start_mark, end_mark)
+        else:
+            self._log_text.insert(tk.END, line)
         self._log_text.yview_moveto(1.0)
         self._log_text.see(tk.END)
 
     def _clear_log(self) -> None:
         self._log_text.delete("1.0", tk.END)
+        self._log_overwrite_marks.clear()
         self._log("Button clicked: Clear Log", level="INFO")
         self._log("Log cleared.")
 
@@ -2284,6 +2673,65 @@ class MainView:
         self._set_status("Selected log copied to clipboard.", colour=_SUCCESS)
         self._log("Selected log copied to clipboard.", level="OK")
         return "break"
+
+    def _copy_log_to_clipboard(self) -> None:
+        try:
+            content = self._log_text.get("1.0", tk.END).strip()
+        except Exception as exc:
+            self._set_status("Failed to read log text.", colour=_ERROR)
+            self._log(f"Copy log failed: {exc}", level="ERROR")
+            return
+
+        if not content:
+            self._set_status("Log is empty. Nothing to copy.", colour=_TEXT_DIM)
+            return
+
+        try:
+            self._root.clipboard_clear()
+            self._root.clipboard_append(content)
+            self._root.update()
+        except Exception as exc:
+            self._set_status("Failed to copy log to clipboard.", colour=_ERROR)
+            self._log(f"Copy log failed: {exc}", level="ERROR")
+            return
+
+        self._set_status("Full log copied to clipboard.", colour=_SUCCESS)
+        self._log("Full log copied to clipboard.", level="OK")
+
+    def _save_log_to_file(self) -> None:
+        try:
+            content = self._log_text.get("1.0", tk.END).rstrip()
+        except Exception as exc:
+            self._set_status("Failed to read log text.", colour=_ERROR)
+            self._log(f"Save log failed: {exc}", level="ERROR")
+            return
+
+        if not content:
+            self._set_status("Log is empty. Nothing to save.", colour=_TEXT_DIM)
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        default_name = f"djirc2kmzsync-log-{timestamp}.txt"
+        path = filedialog.asksaveasfilename(
+            title="Save Activity Log",
+            defaultextension=".txt",
+            initialfile=default_name,
+            filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+                fh.write("\n")
+        except OSError as exc:
+            self._set_status("Failed to save log file.", colour=_ERROR)
+            self._log(f"Save log failed: {exc}", level="ERROR")
+            return
+
+        self._set_status(f"Log saved to {path}", colour=_SUCCESS)
+        self._log(f"Log saved: {path}", level="OK")
 
     def _handle_callback_exception(self, exc_type, exc_value, exc_tb) -> None:
         summary = f"Unhandled UI exception: {exc_value}"

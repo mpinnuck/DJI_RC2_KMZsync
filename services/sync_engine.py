@@ -13,6 +13,17 @@ class SyncEngine:
     """Orchestrates high-level sync workflows between PC and RC mission slots."""
 
     @staticmethod
+    def _prepare_fresh_transfer_state(rc_backend) -> None:
+        """Best-effort hook to avoid stale backend caches around copy operations."""
+        invalidate = getattr(rc_backend, "invalidate_transfer_caches", None)
+        if callable(invalidate):
+            try:
+                invalidate()
+            except Exception:
+                # Copy operations should continue even if cache invalidation fails.
+                pass
+
+    @staticmethod
     def resolve_destination_filename(rc_backend, mission: RC2Mission) -> tuple[str, bool]:
         """
         Resolve destination filename using live slot contents when possible.
@@ -46,6 +57,7 @@ class SyncEngine:
         record_copy_mapping: Callable[[KMZFile, RC2Mission, str], None],
         clear_preview_cache_for_guid: Callable[[str], None],
     ) -> tuple[bool, str]:
+        self._prepare_fresh_transfer_state(rc_backend)
         target_mission = mission
         dest_filename, _ = self.resolve_destination_filename(rc_backend, target_mission)
 
@@ -81,19 +93,30 @@ class SyncEngine:
         target_kmz_file: KMZFile | None,
         record_copy_mapping: Callable[[KMZFile, RC2Mission, str], None],
     ) -> tuple[bool, str]:
+        self._prepare_fresh_transfer_state(rc_backend)
         if not pc_root or not os.path.isdir(pc_root):
             return False, f"PC KMZ folder not found:\n{pc_root}"
 
-        source_filename = (mission.kmz_name or "").strip()
-        if not source_filename:
-            ok_list, listed = rc_backend.list_slot_files(mission)
-            if not ok_list:
-                return False, f"Failed to list mission files:\n{listed}"
-            names = listed if isinstance(listed, list) else []
-            kmz_candidates = sorted([name for name in names if name.lower().endswith(".kmz")])
-            if not kmz_candidates:
-                return False, "No KMZ found in selected RC-2 mission."
+        ok_list, listed = rc_backend.list_slot_files(mission)
+        if not ok_list:
+            return False, f"Failed to list mission files:\n{listed}"
+
+        names = listed if isinstance(listed, list) else []
+        kmz_candidates = [name for name in names if str(name).lower().endswith(".kmz")]
+        if not kmz_candidates:
+            return False, "No KMZ found in selected RC-2 mission."
+
+        by_lower = {name.lower(): name for name in kmz_candidates}
+        preferred = (mission.kmz_name or "").strip().lower()
+        guid_default = f"{mission.guid}.kmz".lower()
+        if preferred and preferred in by_lower:
+            source_filename = by_lower[preferred]
+        elif guid_default in by_lower:
+            source_filename = by_lower[guid_default]
+        elif len(kmz_candidates) == 1:
             source_filename = kmz_candidates[0]
+        else:
+            source_filename = sorted(kmz_candidates)[0]
 
         target_filename = target_kmz_file.filename if target_kmz_file is not None else f"{mission.guid}.kmz"
         dest_path = os.path.join(pc_root, target_filename)

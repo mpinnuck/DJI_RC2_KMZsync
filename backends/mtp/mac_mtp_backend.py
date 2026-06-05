@@ -22,6 +22,8 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -119,13 +121,13 @@ class MacMTPBackend(RCBackend):
         "mtp:DJI RC 2|Internal shared storage|Android|data"
         "|dji.go.v5|files|waypoint"
     )
+    _CAMERA_DAEMONS = {"ptpcamerad", "mscamerad"}
 
     def __init__(self, config: ConfigManager) -> None:
         super().__init__(config)
         self._available: bool = _pymtp is not None
         self._mtp = _pymtp.MTP() if _pymtp is not None else None
         self._connected = False
-        self._prefer_cli_pull = False
         self._connection_lock = threading.RLock()
         self._last_transfer_monotonic: float | None = None
         self._transfer_reconnect_idle_seconds = float(
@@ -143,6 +145,8 @@ class MacMTPBackend(RCBackend):
             "DJIRC2KMZSYNC_MTP_STRICT_SAFE_MODE", "0"
         ).strip() in {"1", "true", "yes", "on"}
         self._logged_global_file_index = False
+        self._last_read_item_ids: dict[str, int] = {}
+        self._last_fast_pull_exception: Exception | None = None
 
     # ==================================================================
     # _raw_* primitives
@@ -157,7 +161,17 @@ class MacMTPBackend(RCBackend):
             with self._session():
                 folder = self._resolve_folder(path)
                 if folder is None:
-                    return False, f"MTP path not found: {path}"
+                    # A transient probe/list race can cache an incomplete tree.
+                    # Refresh caches and retry once, then reconnect and retry once.
+                    self._folder_cache = None
+                    self._folders_by_parent_cache = None
+                    folder = self._resolve_folder(path)
+                    if folder is None:
+                        self._disconnect()
+                        self._ensure_connected()
+                        folder = self._resolve_folder(path)
+                    if folder is None:
+                        return False, f"MTP path not found: {path}"
                 child_folders, child_files = self._child_entries(int(folder.folder_id))
                 rows: List[Tuple[str, bool, str]] = []
                 for entry in child_folders:
@@ -191,25 +205,204 @@ class MacMTPBackend(RCBackend):
         try:
             with self._session():
                 self._refresh_session_before_transfer("read")
+                self.invalidate_transfer_caches()
+                retry_attempts = 2
+                cache_key = self._read_item_cache_key(folder_path, filename)
+                cached_item_id = self._last_read_item_ids.get(cache_key)
                 entry = self._find_file(folder_path, filename)
                 if entry is None:
-                    return False, f"MTP file not found: {filename}"
+                    if cached_item_id is not None:
+                        _LOG.warning(
+                            "MTP read initial lookup did not find %s; trying cached item_id=%s.",
+                            filename,
+                            cached_item_id,
+                        )
+                        if self._pull_to_path_fast(cached_item_id, local_dest):
+                            self._mark_transfer_activity()
+                            return True, local_dest
+
+                    _LOG.warning(
+                        "MTP read initial lookup did not find %s; retrying resolve with cache refresh.",
+                        filename,
+                    )
+                    for attempt in range(1, retry_attempts + 1):
+                        _LOG.warning(
+                            "MTP read resolve retry %s/%s for %s: refreshing caches and re-resolving source file.",
+                            attempt,
+                            retry_attempts,
+                            filename,
+                        )
+                        self.invalidate_transfer_caches()
+                        entry = self._find_file(folder_path, filename)
+                        if entry is not None:
+                            break
+
+                        if cached_item_id is not None:
+                            _LOG.warning(
+                                "MTP read resolve retry %s/%s for %s: trying cached item_id=%s.",
+                                attempt,
+                                retry_attempts,
+                                filename,
+                                cached_item_id,
+                            )
+                            if self._pull_to_path_fast(cached_item_id, local_dest):
+                                self._mark_transfer_activity()
+                                return True, local_dest
+
+                        if attempt < retry_attempts:
+                            time.sleep(0.2)
+
+                if entry is None:
+                    return False, f"MTP file not found after retries: {filename}"
+
                 first_item_id = int(entry.item_id)
-                if self._pull_to_path(first_item_id, local_dest):
+                self._last_read_item_ids[cache_key] = first_item_id
+                cached_item_id = first_item_id
+                if self._pull_to_path_fast(first_item_id, local_dest):
                     self._mark_transfer_activity()
                     return True, local_dest
 
-                # Re-resolve the item ID in a fresh session before a final pull.
-                self._disconnect()
-                self._ensure_connected()
-                entry_retry = self._find_file(folder_path, filename)
-                if entry_retry is None:
-                    return False, f"MTP file not found after reconnect: {filename}"
-                retry_item_id = int(entry_retry.item_id)
-                if not self._pull_to_path(retry_item_id, local_dest):
-                    return False, f"MTP pull failed for {filename}"
-                self._mark_transfer_activity()
-            return True, local_dest
+                first_pull_exc = self._last_fast_pull_exception
+                if first_pull_exc is not None:
+                    _LOG.warning(
+                        "MTP read in-session failed for %s (item_id=%s): %s",
+                        filename,
+                        first_item_id,
+                        self._fmt_exc(first_pull_exc),
+                    )
+                    if self._is_disconnect_error(first_pull_exc):
+                        _LOG.warning(
+                            "MTP read detected disconnect-like failure for %s; reconnecting session once before retries.",
+                            filename,
+                        )
+                        self._disconnect()
+                        self._ensure_connected()
+                        self.invalidate_transfer_caches()
+
+                _LOG.warning(
+                    "MTP read fast attempt failed for %s (item_id=%s); entering in-session retries.",
+                    filename,
+                    first_item_id,
+                )
+
+                missing_after_retry = False
+                for attempt in range(1, retry_attempts + 1):
+                    _LOG.warning(
+                        "MTP read retry %s/%s for %s: refreshing caches and re-resolving source file.",
+                        attempt,
+                        retry_attempts,
+                        filename,
+                    )
+                    self.invalidate_transfer_caches()
+
+                    entry_retry = self._find_file(folder_path, filename)
+                    if entry_retry is None:
+                        if cached_item_id is not None:
+                            _LOG.warning(
+                                "MTP read retry %s/%s for %s: file lookup missing; trying cached item_id=%s.",
+                                attempt,
+                                retry_attempts,
+                                filename,
+                                cached_item_id,
+                            )
+                            pulled_cached = self._pull_to_path_fast(
+                                cached_item_id,
+                                local_dest,
+                            )
+                            if pulled_cached:
+                                _LOG.warning(
+                                    "MTP read retry %s/%s for %s succeeded using cached item_id=%s.",
+                                    attempt,
+                                    retry_attempts,
+                                    filename,
+                                    cached_item_id,
+                                )
+                                self._mark_transfer_activity()
+                                return True, local_dest
+
+                            cached_pull_exc = self._last_fast_pull_exception
+                            if cached_pull_exc is not None:
+                                _LOG.warning(
+                                    "MTP read retry %s/%s for %s cached item_id=%s failed: %s",
+                                    attempt,
+                                    retry_attempts,
+                                    filename,
+                                    cached_item_id,
+                                    self._fmt_exc(cached_pull_exc),
+                                )
+                                if self._is_disconnect_error(cached_pull_exc):
+                                    _LOG.warning(
+                                        "MTP read retry %s/%s for %s saw disconnect-like cached pull failure; reconnecting session before next attempt.",
+                                        attempt,
+                                        retry_attempts,
+                                        filename,
+                                    )
+                                    self._disconnect()
+                                    self._ensure_connected()
+                                    self.invalidate_transfer_caches()
+
+                        _LOG.warning(
+                            "MTP read retry %s/%s for %s: file not found after cache refresh.",
+                            attempt,
+                            retry_attempts,
+                            filename,
+                        )
+                        missing_after_retry = True
+                        if attempt < retry_attempts:
+                            time.sleep(0.2)
+                        continue
+
+                    missing_after_retry = False
+                    retry_item_id = int(entry_retry.item_id)
+                    pulled = self._pull_to_path_fast(retry_item_id, local_dest)
+
+                    if pulled:
+                        self._last_read_item_ids[cache_key] = retry_item_id
+                        _LOG.warning(
+                            "MTP read retry %s/%s for %s succeeded (item_id=%s).",
+                            attempt,
+                            retry_attempts,
+                            filename,
+                            retry_item_id,
+                        )
+                        self._mark_transfer_activity()
+                        return True, local_dest
+
+                    retry_pull_exc = self._last_fast_pull_exception
+                    if retry_pull_exc is not None:
+                        _LOG.warning(
+                            "MTP read retry %s/%s for %s failed (item_id=%s): %s",
+                            attempt,
+                            retry_attempts,
+                            filename,
+                            retry_item_id,
+                            self._fmt_exc(retry_pull_exc),
+                        )
+                        if self._is_disconnect_error(retry_pull_exc):
+                            _LOG.warning(
+                                "MTP read retry %s/%s for %s saw disconnect-like failure; reconnecting session before next attempt.",
+                                attempt,
+                                retry_attempts,
+                                filename,
+                            )
+                            self._disconnect()
+                            self._ensure_connected()
+                            self.invalidate_transfer_caches()
+                    else:
+                        _LOG.warning(
+                            "MTP read retry %s/%s for %s failed (item_id=%s).",
+                            attempt,
+                            retry_attempts,
+                            filename,
+                            retry_item_id,
+                        )
+
+                    if attempt < retry_attempts:
+                        time.sleep(0.2)
+
+                if missing_after_retry:
+                    return False, f"MTP file not found after retries: {filename}"
+                return False, "MTP pull failed for " f"{filename} after {retry_attempts + 1} attempts"
         except Exception as exc:
             return False, f"MTP read failed:\n{self._fmt_exc(exc)}"
 
@@ -224,6 +417,7 @@ class MacMTPBackend(RCBackend):
         try:
             with self._session():
                 self._refresh_session_before_transfer("write")
+                self.invalidate_transfer_caches()
                 folder = self._resolve_folder(dest_folder)
                 if folder is None:
                     return False, f"Destination folder not found: {dest_folder}"
@@ -282,6 +476,7 @@ class MacMTPBackend(RCBackend):
                     # retry once with freshly resolved folder metadata.
                     self._disconnect()
                     self._ensure_connected()
+                    self.invalidate_transfer_caches()
                     folder_retry = self._resolve_folder(dest_folder)
                     if folder_retry is None:
                         raise RuntimeError(
@@ -315,6 +510,7 @@ class MacMTPBackend(RCBackend):
                 # Invalidate caches -- file listing has changed.
                 self._file_cache = None
                 self._files_by_parent_cache = None
+                self._last_read_item_ids = {}
                 self._mark_transfer_activity()
             return True, f"Copied to {_mtp_join(dest_folder, dest_filename)}"
         except Exception as exc:
@@ -327,6 +523,7 @@ class MacMTPBackend(RCBackend):
             return False, self._unavailable()
         try:
             with self._session():
+                self.invalidate_transfer_caches()
                 entry = self._find_file(folder, filename)
                 if entry is None:
                     return False, f"MTP file not found: {filename}"
@@ -410,7 +607,12 @@ class MacMTPBackend(RCBackend):
                 self._folder_cache = None
                 self._folders_by_parent_cache = None
                 # Keep probe lightweight: just confirm waypoint folder exists.
-                return self._waypoint_folder_exists()
+                exists = self._waypoint_folder_exists()
+                if not exists:
+                    # Avoid poisoning subsequent list calls with an incomplete tree.
+                    self._folder_cache = None
+                    self._folders_by_parent_cache = None
+                return exists
         except Exception:
             return False
 
@@ -524,77 +726,25 @@ class MacMTPBackend(RCBackend):
                 if not selected_entries:
                     return result
 
-                unresolved: dict[str, tuple[int, str]] = {}
-
-                # First pass: fast in-session pulls via pymtp, one call per preview.
+                # Fast in-session pulls (partial-read first, GetObject fallback)
+                # are robust on RC-2 and avoid any competing CLI sessions.
                 for guid, (item_id, selected_name) in selected_entries.items():
                     cache_base = _preview_cache_base(root, guid)
                     ext = os.path.splitext(selected_name)[1].lower() or ".jpg"
                     cache_path = f"{cache_base}{ext}"
                     temp_path = f"{cache_path}.{os.getpid()}.{guid}.tmp"
                     try:
-                        direct_ok = False
-                        if not self._prefer_cli_pull:
-                            try:
-                                self._quiet(self._mtp.get_file_to_file, int(item_id), temp_path)
-                                direct_ok = _is_usable_preview(temp_path)
-                            except Exception:
-                                direct_ok = False
-
-                        if direct_ok:
+                        if self._pull_to_path_fast(item_id, temp_path) and _is_usable_preview(temp_path):
                             _promote_preview(temp_path, cache_path)
                             result[guid] = cache_path
                             continue
-
-                        unresolved[guid] = (item_id, selected_name)
+                        result[guid] = None
                     finally:
                         if os.path.exists(temp_path):
                             try:
                                 os.remove(temp_path)
                             except OSError:
                                 pass
-
-                if not unresolved:
-                    self._prefer_cli_pull = False
-                    return result
-
-                # Second pass: one disconnect, batched mtp-getfile pulls, one reconnect.
-                mtp_getfile = shutil.which("mtp-getfile")
-                if not mtp_getfile:
-                    for guid in unresolved:
-                        result[guid] = None
-                    return result
-
-                self._disconnect()
-                any_cli_success = False
-                try:
-                    for guid, (item_id, selected_name) in unresolved.items():
-                        cache_base = _preview_cache_base(root, guid)
-                        ext = os.path.splitext(selected_name)[1].lower() or ".jpg"
-                        cache_path = f"{cache_base}{ext}"
-                        temp_path = f"{cache_path}.{os.getpid()}.{guid}.tmp"
-                        try:
-                            ok = self._pull_via_cli(item_id, temp_path)
-                            if ok and _is_usable_preview(temp_path):
-                                _promote_preview(temp_path, cache_path)
-                                result[guid] = cache_path
-                                any_cli_success = True
-                            else:
-                                result[guid] = None
-                        finally:
-                            if os.path.exists(temp_path):
-                                try:
-                                    os.remove(temp_path)
-                                except OSError:
-                                    pass
-                finally:
-                    try:
-                        self._ensure_connected()
-                    except Exception:
-                        pass
-
-                if any_cli_success:
-                    self._prefer_cli_pull = True
         except Exception:
             # Preserve existing behavior: preview failures are non-fatal.
             return result
@@ -624,7 +774,7 @@ class MacMTPBackend(RCBackend):
         self._file_cache   = None
         self._files_by_parent_cache = None
         self._logged_global_file_index = False
-        self._prefer_cli_pull = False
+        self._last_read_item_ids = {}
 
     def _mark_transfer_activity(self) -> None:
         self._last_transfer_monotonic = time.monotonic()
@@ -643,6 +793,13 @@ class MacMTPBackend(RCBackend):
         self._disconnect()
         self._ensure_connected()
 
+    def invalidate_transfer_caches(self) -> None:
+        """Clear folder/file caches so copy operations use live device state."""
+        self._folder_cache = None
+        self._folders_by_parent_cache = None
+        self._file_cache = None
+        self._files_by_parent_cache = None
+
     def _wait_for_file_delete(self, folder_id: int, filename: str, timeout: float = 2.5) -> None:
         delete_deadline = time.monotonic() + timeout
         while time.monotonic() < delete_deadline:
@@ -652,14 +809,195 @@ class MacMTPBackend(RCBackend):
             self._file_cache = None
             self._files_by_parent_cache = None
 
+    @staticmethod
+    def _find_local_adb_listener_pids() -> list[int]:
+        """Return PIDs for local tcp:5037 listeners owned by adb."""
+        try:
+            proc = subprocess.run(
+                ["lsof", "-nP", "-iTCP:5037", "-sTCP:LISTEN", "-Fpc"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+        except Exception:
+            return []
+
+        if not proc.stdout:
+            return []
+
+        pids: list[int] = []
+        current_pid: int | None = None
+        current_cmd = ""
+
+        for line in proc.stdout.splitlines():
+            if not line:
+                continue
+            prefix, payload = line[:1], line[1:]
+            if prefix == "p":
+                if current_pid is not None and current_cmd.lower().startswith("adb"):
+                    pids.append(current_pid)
+                try:
+                    current_pid = int(payload)
+                except ValueError:
+                    current_pid = None
+                current_cmd = ""
+            elif prefix == "c":
+                current_cmd = payload.strip()
+
+        if current_pid is not None and current_cmd.lower().startswith("adb"):
+            pids.append(current_pid)
+
+        return sorted(set(pids))
+
+    def _release_host_adb_hold(self) -> None:
+        """Release host adb daemon so RC-2 can enumerate via MTP."""
+        initial_pids = self._find_local_adb_listener_pids()
+        if not initial_pids:
+            return
+
+        _LOG.info(
+            "Detected host adb daemon on tcp:5037 (pids=%s); releasing before MTP connect.",
+            ",".join(str(pid) for pid in initial_pids),
+        )
+
+        try:
+            adb_path = shutil.which("adb")
+            if adb_path:
+                subprocess.run(
+                    [adb_path, "kill-server"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=3,
+                )
+
+            remaining = self._find_local_adb_listener_pids()
+            for pid in remaining:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    continue
+
+            if remaining:
+                time.sleep(0.3)
+
+            stubborn = self._find_local_adb_listener_pids()
+            for pid in stubborn:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    continue
+
+            final = self._find_local_adb_listener_pids()
+            if final:
+                _LOG.warning(
+                    "adb still listening on tcp:5037 after release attempt (pids=%s).",
+                    ",".join(str(pid) for pid in final),
+                )
+            else:
+                _LOG.info("Released host adb hold; waiting for USB MTP re-enumeration.")
+                time.sleep(1.0)
+        except Exception as exc:
+            _LOG.warning("Failed to release host adb hold: %s", self._fmt_exc(exc))
+
+    @classmethod
+    def _find_camera_owner_pids(cls) -> list[tuple[int, str]]:
+        """Return camera-daemon owners currently claiming RC-2 USB interfaces."""
+        try:
+            proc = subprocess.run(
+                ["ioreg", "-r", "-l", "-w", "0", "-c", "IOUSBHostInterface"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+        except Exception:
+            return []
+
+        text = proc.stdout or ""
+        if not text:
+            return []
+
+        owners: set[tuple[int, str]] = set()
+        vendor_seen = False
+        product_seen = False
+
+        for line in text.splitlines():
+            if '"idVendor" = 11427' in line:
+                vendor_seen = True
+            if '"idProduct" = 4129' in line:
+                product_seen = True
+
+            if '"UsbExclusiveOwner"' not in line:
+                continue
+            if not (vendor_seen and product_seen):
+                vendor_seen = False
+                product_seen = False
+                continue
+
+            match = re.search(r'pid\s+(\d+),\s*([^"\\]+)', line)
+            if match:
+                pid = int(match.group(1))
+                name = match.group(2).strip().lower()
+                if name in cls._CAMERA_DAEMONS:
+                    owners.add((pid, name))
+
+            vendor_seen = False
+            product_seen = False
+
+        return sorted(owners)
+
+    def _release_host_camera_hold(self) -> bool:
+        """Release macOS camera daemons that claim the RC-2 MTP interface."""
+        owners = self._find_camera_owner_pids()
+        if not owners:
+            return True
+
+        _LOG.info(
+            "Detected RC-2 camera daemon owners: %s",
+            ",".join(f"{name}:{pid}" for pid, name in owners),
+        )
+
+        for pid, _name in owners:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                continue
+
+        time.sleep(0.15)
+
+        stubborn = self._find_camera_owner_pids()
+        for pid, _name in stubborn:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                continue
+
+        time.sleep(0.15)
+
+        final = self._find_camera_owner_pids()
+        if final:
+            _LOG.warning(
+                "RC-2 camera daemon claim persists: %s",
+                ",".join(f"{name}:{pid}" for pid, name in final),
+            )
+            return False
+        else:
+            _LOG.info("Released RC-2 camera daemon claim before MTP connect.")
+            return True
+
     def _ensure_connected(self) -> None:
         if self._mtp is None:
             raise RuntimeError("Native MTP backend unavailable (pymtp not installed)")
         if self._connected:
             return
+        self._release_host_adb_hold()
         last_exc: Exception | None = None
         for attempt in range(3):
             try:
+                if not self._release_host_camera_hold():
+                    raise RuntimeError("RC-2 camera daemon still owns USB interface")
                 try:
                     self._quiet(self._mtp.detect_devices)
                 except Exception:
@@ -675,7 +1013,7 @@ class MacMTPBackend(RCBackend):
             except Exception as exc:
                 last_exc = exc
                 if attempt < 2:
-                    time.sleep(0.2)
+                    time.sleep(0.35)
         self._connected = False
         raise last_exc or RuntimeError("Unable to connect to MTP device")
 
@@ -711,13 +1049,11 @@ class MacMTPBackend(RCBackend):
         text = (str(exc) or "").lower()
         name = type(exc).__name__.lower()
         return (
-            "commandfailed" in name
-            or "nodevice" in name
+            "nodevice" in name
             or "notconnected" in name
             or "unable to initialize" in text
             or "open session" in text
-            or "usb" in text
-            or "connection" in text
+            or ("usb" in text and "connection" in text)
         )
 
     def _quiet(self, method, *args, **kwargs):
@@ -877,85 +1213,102 @@ class MacMTPBackend(RCBackend):
     # File pull helpers
     # ==================================================================
 
-    def _pull_to_path(self, item_id: int, local_dest: str) -> bool:
-        """Pull by object id using pymtp, with mtp-getfile CLI fallback."""
-        def _has_file(path: str) -> bool:
-            return os.path.isfile(path) and os.path.getsize(path) > 0
-
-        mtp_getfile = shutil.which("mtp-getfile")
-
-        # If this session already proved pymtp pull is unreliable, skip the
-        # expensive pymtp retry/disconnect cycle for every preview file.
-        if self._prefer_cli_pull and mtp_getfile:
-            self._disconnect()
-            if self._pull_via_cli(item_id, local_dest):
-                return True
-            try:
-                self._ensure_connected()
-            except Exception:
-                pass
-
-        # First attempt: use the current session directly.
-        try:
-            self._quiet(self._mtp.get_file_to_file, int(item_id), local_dest)
-            if _has_file(local_dest):
-                self._prefer_cli_pull = False
-                return True
-        except Exception:
-            pass
-
-        # Second attempt: force session reset and retry once before fallback.
-        try:
-            self._disconnect()
-            self._ensure_connected()
-            self._quiet(self._mtp.get_file_to_file, int(item_id), local_dest)
-            if _has_file(local_dest):
-                self._prefer_cli_pull = False
-                return True
-        except Exception:
-            pass
-
-        # If mtp-getfile is not available, do not tear down the current
-        # session just for a failed read attempt.
-        if not mtp_getfile:
+    def _pull_to_path_via_partial(self, item_id: int, local_dest: str) -> bool:
+        """Pull by object id using chunked LIBMTP_GetPartialObject reads."""
+        chunk_size = 65536
+        get_partial = getattr(self._mtp.mtp, "LIBMTP_GetPartialObject", None)
+        if get_partial is None:
             return False
 
-        # Some RC-2 / libmtp combinations fail reads via pymtp with CommandFailed
-        # but succeed via mtp-getfile. Ensure pymtp releases its session before
-        # invoking the CLI path to avoid competing device sessions.
-        self._disconnect()
-        if self._pull_via_cli(item_id, local_dest):
-            self._prefer_cli_pull = True
+        free_mem = getattr(self._mtp.mtp, "LIBMTP_FreeMemory", None)
+
+        try:
+            get_partial.restype = ctypes.c_int
+        except Exception:
+            pass
+
+        total_bytes = 0
+        chunk_count = 0
+        offset = 0
+
+        try:
+            with open(local_dest, "wb") as out_fh:
+                while True:
+                    buf = ctypes.POINTER(ctypes.c_ubyte)()
+                    buf_len = ctypes.c_uint32(0)
+                    ret = self._quiet(
+                        get_partial,
+                        self._mtp.device,
+                        ctypes.c_uint32(int(item_id)),
+                        ctypes.c_uint64(offset),
+                        ctypes.c_uint32(chunk_size),
+                        ctypes.byref(buf),
+                        ctypes.byref(buf_len),
+                    )
+
+                    if int(ret) != 0:
+                        _LOG.warning(
+                            "GetPartialObject item_id=%s offset=%s returned %s",
+                            item_id,
+                            offset,
+                            ret,
+                        )
+                        return False
+
+                    n = int(buf_len.value)
+                    if n <= 0:
+                        break
+
+                    out_fh.write(ctypes.string_at(buf, n))
+                    total_bytes += n
+                    chunk_count += 1
+                    offset += n
+
+                    if callable(free_mem) and bool(buf):
+                        try:
+                            self._quiet(free_mem, ctypes.cast(buf, ctypes.c_void_p))
+                        except Exception:
+                            pass
+
+                    if n < chunk_size:
+                        break
+        except Exception as exc:
+            _LOG.warning(
+                "GetPartialObject pull item_id=%s failed: %s",
+                item_id,
+                self._fmt_exc(exc),
+            )
+            return False
+
+        if total_bytes <= 0:
+            _LOG.warning(
+                "GetPartialObject item_id=%s returned 0 bytes total.",
+                item_id,
+            )
+            return False
+
+        _LOG.debug(
+            "GetPartialObject item_id=%s assembled %s bytes in %s chunk(s).",
+            item_id,
+            total_bytes,
+            chunk_count,
+        )
+        return os.path.isfile(local_dest) and os.path.getsize(local_dest) > 0
+
+    def _pull_to_path_fast(self, item_id: int, local_dest: str) -> bool:
+        """Single-attempt pull path using partial reads then GetObject fallback."""
+        self._last_fast_pull_exception = None
+
+        # DJI RC-2 firmware can reject GetObject while allowing GetPartialObject.
+        if self._pull_to_path_via_partial(item_id, local_dest):
             return True
 
-        # Best-effort reconnection for subsequent operations in this process.
         try:
-            self._ensure_connected()
-        except Exception:
-            pass
-        return False
-
-    @staticmethod
-    def _pull_via_cli(item_id: int, local_dest: str) -> bool:
-        """Pull using the mtp-getfile CLI tool (part of libmtp)."""
-        mtp_getfile = shutil.which("mtp-getfile")
-        if not mtp_getfile:
+            self._quiet(self._mtp.get_file_to_file, int(item_id), local_dest)
+            return os.path.isfile(local_dest) and os.path.getsize(local_dest) > 0
+        except Exception as exc:
+            self._last_fast_pull_exception = exc
             return False
-        try:
-            result = subprocess.run(
-                [mtp_getfile, str(int(item_id)), local_dest],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-        return (
-            result.returncode == 0
-            and os.path.isfile(local_dest)
-            and os.path.getsize(local_dest) > 0
-        )
 
     # ==================================================================
     # Path helpers
@@ -994,6 +1347,10 @@ class MacMTPBackend(RCBackend):
                     parts = parts[idx:]
                 break
         return parts
+
+    @staticmethod
+    def _read_item_cache_key(folder_path: str, filename: str) -> str:
+        return f"{folder_path.strip().lower()}|{filename.strip().lower()}"
 
     # ==================================================================
     # Helpers
