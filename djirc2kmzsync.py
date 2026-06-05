@@ -7,6 +7,8 @@
 # .venv\Scripts\python.exe -m PyInstaller --noconfirm --clean DJI_RC2_KMZsync_w.spec
 # MAC Build
 # .venvm/bin/python -m PyInstaller --noconfirm --clean --distpath distm DJI_RC2_KMZsync_m.spec
+# sudo ditto "./distm/DJI_RC2_KMZsync.app" "/Applications/DJI_RC2_KMZsync.app"
+#
 
 import tkinter as tk
 
