@@ -389,6 +389,14 @@ Dummy slot notes:
 - Left COPY targets the configured dummy slot only when no RC mission is selected.
 - You only need to run Set Dummy Slot again when you want to change dummy target slots.
 
+## Update an Existing Mission
+
+To update a mission on the RC-2:
+
+1. Select the RC-2 mission you want to update.
+2. Select the new mission KMZ in the PC list.
+3. Click the left COPY button.
+
 Copy notes:
 - Upload and copy-back overwrite existing target filenames when present.
 - In this workflow, the preview image is the practical way to identify which new RC mission GUID matches your intended PC KMZ.
