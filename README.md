@@ -27,7 +27,8 @@ Practical outcome:
 Fully supported platforms:
 
 - Windows (PyInstaller onedir build via `DJI_RC2_KMZsync_w.spec`)
-- macOS (PyInstaller onedir + `.app` build via `DJI_RC2_KMZsync_m.spec`)
+- macOS Apple Silicon (arm64; PyInstaller onedir + `.app` build via `DJI_RC2_KMZsync_m.spec`)
+- macOS Intel (x86_64; built in CI on `macos-13` with `DJI_RC2_KMZsync_m.spec`)
 
 ## Quick Start (60 seconds)
 
@@ -142,7 +143,8 @@ This repository includes a GitHub Actions workflow that builds both platforms an
 Release assets:
 
 - DJI_RC2_KMZsync_windows.zip
-- DJI_RC2_KMZsync_macos.zip
+- DJI_RC2_KMZsync_macos.zip (Apple Silicon/arm64)
+- DJI_RC2_KMZsync_macos_x86_64.zip (Intel)
 
 After downloading:
 
@@ -344,7 +346,8 @@ distm/
 Important:
 
 - Windows: distribute/copy the entire `dist\DJI_RC2_KMZsync` folder.
-- macOS: distribute `DJI_RC2_KMZsync.app` (or the release zip).
+- macOS Apple Silicon: distribute `DJI_RC2_KMZsync.app` (or `DJI_RC2_KMZsync_macos.zip`).
+- macOS Intel: use `DJI_RC2_KMZsync_macos_x86_64.zip` from Releases.
 
 ## Workflow: Add Mission Using Dummy Slot
 

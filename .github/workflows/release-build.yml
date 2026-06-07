@@ -11,18 +11,24 @@ permissions:
 
 jobs:
   build:
-    name: Build (${{ matrix.os }})
+    name: Build (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
+            label: windows
             spec: DJI_RC2_KMZsync_w.spec
             asset_name: DJI_RC2_KMZsync_windows.zip
-          - os: macos-latest
+          - os: macos-14
+            label: macos-arm64
             spec: DJI_RC2_KMZsync_m.spec
             asset_name: DJI_RC2_KMZsync_macos.zip
+          - os: macos-13
+            label: macos-x86_64
+            spec: DJI_RC2_KMZsync_m.spec
+            asset_name: DJI_RC2_KMZsync_macos_x86_64.zip
 
     steps:
       - name: Checkout
@@ -78,4 +84,5 @@ jobs:
           files: |
             artifacts/**/DJI_RC2_KMZsync_windows.zip
             artifacts/**/DJI_RC2_KMZsync_macos.zip
+            artifacts/**/DJI_RC2_KMZsync_macos_x86_64.zip
           generate_release_notes: true
